@@ -55,6 +55,12 @@
     },
     {
       "path": "packages/channels-x"
+    },
+    {
+      "path": "packages/browser"
+    },
+    {
+      "path": "packages/channels-slack"
     }
   ]
 }

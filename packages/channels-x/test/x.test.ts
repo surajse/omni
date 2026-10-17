@@ -161,3 +161,68 @@ describe('XChannel', () => {
     ).toThrow('consumerKey');
   });
 });
+
+describe('XChannel.search', () => {
+  const creds = { consumerKey: 'ck', consumerSecret: 'cs', accessToken: 't', accessTokenSecret: 'ts' };
+
+  it('queries /tweets/search/recent signed with OAuth and maps results', async () => {
+    const { fetchImpl, seen } = scriptedFetch([
+      () =>
+        jsonResponse({
+          data: [
+            { id: '1', text: 'hello', author_id: 'u9', created_at: '2026-10-17T00:00:00Z' },
+            { id: '2', text: 'world', author_id: 'u8' },
+          ],
+          meta: { result_count: 2 },
+        }),
+    ]);
+    const channel = new XChannel({ ...creds, fetchImpl });
+    const hits = await channel.search('omni agents', { maxResults: 25 });
+    expect(hits).toEqual([
+      { id: '1', text: 'hello', authorId: 'u9', createdAt: '2026-10-17T00:00:00Z' },
+      { id: '2', text: 'world', authorId: 'u8', createdAt: undefined },
+    ]);
+    expect(seen).toHaveLength(1);
+    const url = new URL(seen[0]!.url);
+    expect(url.pathname).toBe('/2/tweets/search/recent');
+    expect(url.searchParams.get('query')).toBe('omni agents');
+    expect(url.searchParams.get('max_results')).toBe('25');
+    expect(authHeaderOf(seen[0]!)).toMatch(/^OAuth /);
+  });
+
+  it('clamps maxResults to 1..100 and rejects empty queries', async () => {
+    const { fetchImpl, seen } = scriptedFetch([() => jsonResponse({ data: [], meta: {} })]);
+    const channel = new XChannel({ ...creds, fetchImpl });
+    await channel.search('x', { maxResults: 500 });
+    expect(new URL(seen[0]!.url).searchParams.get('max_results')).toBe('100');
+    await channel.search('x', { maxResults: 0 });
+    expect(new URL(seen[1]!.url).searchParams.get('max_results')).toBe('1');
+    await expect(channel.search('   ')).rejects.toThrow(/non-empty/);
+  });
+
+  it('honors 429 backoff once, then throws if still limited', async () => {
+    const slept: number[] = [];
+    const { fetchImpl, seen } = scriptedFetch([
+      () => jsonResponse({ title: 'Too Many Requests' }, 429, { 'retry-after': '0' }),
+      () => jsonResponse({ data: [{ id: '7', text: 'recovered' }] }),
+    ]);
+    const channel = new XChannel({ ...creds, fetchImpl, sleepImpl: async (ms) => { slept.push(ms); } });
+    const hits = await channel.search('retry me');
+    expect(hits).toEqual([{ id: '7', text: 'recovered', authorId: undefined, createdAt: undefined }]);
+    expect(seen).toHaveLength(2);
+    expect(slept).toEqual([0]);
+
+    const { fetchImpl: fetchImpl2 } = scriptedFetch([
+      () => jsonResponse({ title: 'Too Many Requests' }, 429, { 'retry-after': '0' }),
+      () => jsonResponse({ title: 'Too Many Requests' }, 429, { 'retry-after': '0' }),
+    ]);
+    const channel2 = new XChannel({ ...creds, fetchImpl: fetchImpl2, sleepImpl: async () => {} });
+    await expect(channel2.search('still limited')).rejects.toThrow(/rate limited \(429\) after backoff/);
+  });
+
+  it('throws on non-200 responses', async () => {
+    const { fetchImpl } = scriptedFetch([() => jsonResponse({ title: 'Forbidden' }, 403)]);
+    const channel = new XChannel({ ...creds, fetchImpl });
+    await expect(channel.search('nope')).rejects.toThrow(/HTTP 403/);
+  });
+});

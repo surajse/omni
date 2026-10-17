@@ -2,6 +2,56 @@
 
 All notable changes to Omni. Format: Keep a Changelog.
 
+## [1.3.0] — 2026-10-17
+
+**Browser tool, Slack, provider router, X search** — closes the CRITICAL gap
+from the 2026-10-17 gap review (every rival had real browser automation;
+Omni's sandbox was terminal-only).
+
+### Added
+- Browser tool (`@omni/browser`, zero deps): hand-rolled CDP client over
+  Node's built-in WebSocket (framing, id matching, timeouts, event
+  subscription — unit-tested against a fake socket), `CdpBrowserBackend`
+  (`open` with load-event wait, `snapshot` as a pruned accessibility tree,
+  `click`/`type` by AX node id via DOM quads, `screenshot`), and
+  `browser.open` / `browser.snapshot` / `browser.click` / `browser.type`
+  tools — all write-class (ask by default; browsing is network egress),
+  attached when `OMNI_BROWSER_CDP_URL` is set (`ws://…` or
+  `http://host:9222` via `/json/list` discovery). `Dockerfile.browser`
+  (headless Chromium, `--remote-debugging-port=9222`) ships as
+  documentation-as-code. Docs: BROWSER.md.
+- Slack adapter (`@omni/channels-slack`, zero deps): Events API webhook with
+  HMAC-SHA256 `v0=` signature verification (5-minute tolerance), automatic
+  `url_verification` answers, `app_mention` + human `message` routing
+  (bot/edit/delete noise ignored), threaded `chat.postMessage` replies;
+  `omni slack <agent-id> [--port N]`; `omni doctor` gains Slack rows.
+  Docs: CHANNELS.md (app setup: scopes `app_mentions:read`, `chat:write`,
+  `im:history`; Events URL).
+- Provider router (kernel): agent config gains `providers[]` and `routing[]`;
+  `RoutingProvider` resolves `<providerId>:<model>` prefix → routing-rule
+  regex → `models` list → first entry, and falls back (max 2) on 429/5xx and
+  network errors, logging each switch. Non-retryable errors (400/401/…)
+  fail fast. Single-provider configs keep working unchanged.
+- X bulk search: `XChannel.search()` over `GET /2/tweets/search/recent`
+  (OAuth 1.0a signed, 429 backoff); `omni x-search "<query>" [--max N]`
+  prints `id · @author · created_at` + text.
+- `omni doctor` gains `OMNI_BROWSER_CDP_URL` (+ Slack rows): names only,
+  never values.
+
+### Honestly out
+- Realtime voice calls: without a real telephony provider this would be pure
+  theater — stays out. Telegram voice messages cover ~80% of the use case.
+- Hosted relay: contradicts the local-first thesis — stays out.
+
+### Honest limits (carried forward)
+- No live-Chrome E2E on the build machine (no Docker/Chromium): CDP
+  protocol + backend logic are unit-tested (fake socket, stubbed
+  connection); the real-Chrome checklist lives in docs/BROWSER.md.
+- The web console (`omni web`) does not attach browser tools yet (its agent
+  factory is synchronous); all CLI flows do, including handoff sub-agents.
+- Slack/X/bulk-search exercised with mocked fetch only — needs real
+  credentials on a live machine.
+
 ## [1.2.0] — 2026-10-17
 
 **Voice + X.**

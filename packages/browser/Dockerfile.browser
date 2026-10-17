@@ -1,0 +1,36 @@
+# Headless Chromium for Omni's browser tool.
+#
+# NOT built or tested in CI here (no Docker on the build machine) — this file
+# is documentation-as-code. Build and run it on a machine with Docker:
+#
+#   docker build -f Dockerfile.browser -t omni-browser .
+#   docker run -d --name omni-browser -p 9222:9222 omni-browser
+#
+# Then point Omni at it:
+#
+#   export OMNI_BROWSER_CDP_URL=http://localhost:9222
+#
+# Omni resolves the /json/list discovery page to a page-target WebSocket URL,
+# so the plain http://host:9222 form is enough. See docs/BROWSER.md.
+#
+# Security note: --no-sandbox is required to run Chromium as root inside
+# Docker. The browser runs pages the agent opens; treat it like any
+# untrusted-content sandbox — keep it on localhost, don't expose 9222
+# publicly, and rely on Omni's policy engine (browser.* tools ask by
+# default) for the approval boundary.
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends chromium \
+  && rm -rf /var/lib/apt/lists/*
+
+EXPOSE 9222
+
+ENTRYPOINT ["chromium", \
+  "--headless=new", \
+  "--no-sandbox", \
+  "--disable-gpu", \
+  "--disable-dev-shm-usage", \
+  "--remote-debugging-address=0.0.0.0", \
+  "--remote-debugging-port=9222", \
+  "about:blank"]

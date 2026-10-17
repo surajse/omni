@@ -3,7 +3,9 @@
     "omni": "dist/src/index.js"
   },
   "dependencies": {
+    "@omni/browser": "workspace:*",
     "@omni/channels": "workspace:*",
+    "@omni/channels-slack": "workspace:*",
     "@omni/channels-telegram": "workspace:*",
     "@omni/channels-whatsapp": "workspace:*",
     "@omni/channels-x": "workspace:*",
@@ -49,5 +51,5 @@
     "url": "git+https://github.com/surajse/omni.git"
   },
   "type": "module",
-  "version": "1.2.0"
+  "version": "1.3.0"
 }

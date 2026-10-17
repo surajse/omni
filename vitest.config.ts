@@ -26,6 +26,8 @@ export default defineConfig({
       '@omni/packs': src('packs'),
       '@omni/voice': src('voice'),
       '@omni/channels-x': src('channels-x'),
+      '@omni/browser': src('browser'),
+      '@omni/channels-slack': src('channels-slack'),
     },
   },
   test: {

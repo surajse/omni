@@ -74,4 +74,41 @@ describe('buildSubAgentWiring (handoff completion)', () => {
       memory.close();
     }
   });
+
+  it('wires a RoutingProvider when the config carries providers', async () => {
+    const { home, registry, memory } = setupHome();
+    try {
+      const cfg = configFor('routed');
+      cfg.providers = [
+        { id: 'a', baseUrl: 'https://a.example/v1', apiKey: 'k', models: ['m1'] },
+        { id: 'b', baseUrl: 'https://b.example/v1', apiKey: 'k', models: ['m2'] },
+      ];
+      cfg.routing = [{ match: '^code-', providerId: 'b' }];
+      registry.create(cfg);
+      const wiring = await buildSubAgentWiring(home, memory, registry.get('routed'), {
+        approve: async () => true,
+        withSandbox: false,
+      });
+      expect(wiring.deps.provider.name).toBe('routing');
+    } finally {
+      memory.close();
+    }
+  });
+
+  it('leaves browser tools off when OMNI_BROWSER_CDP_URL is unset', async () => {
+    const saved = process.env['OMNI_BROWSER_CDP_URL'];
+    delete process.env['OMNI_BROWSER_CDP_URL'];
+    const { home, registry, memory } = setupHome();
+    try {
+      const wiring = await buildSubAgentWiring(home, memory, registry.get('helper'), {
+        approve: async () => true,
+        withSandbox: false,
+      });
+      expect(wiring.deps.gateway.has('browser.open')).toBe(false);
+      expect(wiring.deps.gateway.has('browser.snapshot')).toBe(false);
+    } finally {
+      if (saved !== undefined) process.env['OMNI_BROWSER_CDP_URL'] = saved;
+      memory.close();
+    }
+  });
 });

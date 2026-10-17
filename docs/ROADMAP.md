@@ -126,10 +126,37 @@ experience gaps — each a direct answer to a rival's best weapon:
   integrations with no portable export format, so there is nothing real to
   import; documented as a non-goal, not shipped as theater.
 
-## What's next (post-1.2)
+## v1.3 — Browser tool, Slack, provider router, X search (this release)
 
-- Hosted relay: share agents without self-hosting (same policy engine + audit log)
-- Mobile app (the agent in your pocket, on your server)
+- **Browser tool** (`@omni/browser`, zero deps): hand-rolled CDP client over
+  Node's built-in WebSocket + `CdpBrowserBackend` (open/snapshot/click/type
+  via Page/DOM/Input/Accessibility domains) + `browser.*` tools on the
+  gateway — write-class (ask by default), attached when `OMNI_BROWSER_CDP_URL`
+  is set (`ws://…` or `http://host:9222` with `/json/list` discovery).
+  `Dockerfile.browser` (headless Chromium, remote-debugging-port 9222) ships
+  as documentation-as-code. Docs: BROWSER.md (incl. real-Chrome checklist and
+  honest limits — no live-Chrome E2E on the build machine; web console doesn't
+  attach browser tools yet).
+- **Slack adapter** (`@omni/channels-slack`, zero deps): Events API webhook
+  (node:http) with HMAC-SHA256 `v0=` signature verification (5-min tolerance),
+  `url_verification` challenge handling, `app_mention` + human `message`
+  routing, threaded `chat.postMessage` replies; `omni slack <id> [--port]`.
+  Docs: CHANNELS.md (app setup, scopes, Events URL).
+- **Provider router** (kernel): agent config gains `providers[]`
+  (`{id, baseUrl, apiKeyEnv, models[]}`) + `routing[]` regex rules;
+  `RoutingProvider` resolves `<id>:<model>` prefix → rule → models list →
+  first entry, and falls back (max 2) on 429/5xx/network errors with a logged
+  switch. Single-`model` configs keep working unchanged (back-compat).
+- **X bulk search**: `XChannel.search()` over `GET /2/tweets/search/recent`
+  (OAuth 1.0a, 429 backoff); `omni x-search "<query>" [--max N]`.
+- Honestly out (stays out): realtime voice calls (theater without a telephony
+  provider); hosted relay (local-first thesis).
+
+## What's next (post-1.3)
+
+- **v1.4: email channel + rich artifacts console** — bring-your-own-mailbox
+  channel (the agent-owned-inbox primitive, done honestly); sandboxed iframe
+  rendering of agent-produced HTML in the web console.
 - Marketplace curation: signed plugin manifests, review queue, usage/cost tracking
 - OpenDots dot importer; per-agent egress firewall; ANN vector index when
   personal-scale brute force stops being enough

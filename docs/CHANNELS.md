@@ -93,6 +93,47 @@ Automation rules — read this before going live:
 - Approvals for X-originated runs use the console y/n prompt (`askApproval`) —
   run it where you can see the terminal, or keep write-class tools deny-gated.
 
+### Bulk search (`omni x-search`)
+
+`omni x-search "<query>" [--max N]` searches recent posts over the X API v2
+`GET /2/tweets/search/recent` (same OAuth 1.0a signing, same `X_*` env vars) —
+the agent-platform answer to Grok Bot's native X search. Prints
+`id · @author · created_at` plus text, newest first. `--max` defaults to 10
+and is clamped to 1–100 (API limit). A 429 backs off once on `retry-after`
+before failing loudly.
+
+## Slack (`@omni/channels-slack`)
+
+Serves the agent in Slack workspaces over the Events API — zero dependencies,
+HMAC-SHA256 request verification on every inbound call.
+
+Setup (one-time, at [api.slack.com/apps](https://api.slack.com/apps)):
+
+1. **Create an app** (from scratch), note the **Signing Secret**
+   (`SLACK_SIGNING_SECRET`) under *Basic Information*.
+2. Under **OAuth & Permissions**, add the bot scopes
+   `app_mentions:read`, `chat:write`, `im:history` (add `channels:history`
+   if the bot should read channel messages it isn't mentioned in).
+3. **Install the app** to your workspace; copy the **Bot User OAuth Token**
+   (`xoxb-…` → `SLACK_BOT_TOKEN`).
+4. Under **Event Subscriptions**: enable events, set the **Request URL** to
+   `https://<your-public-url>/slack/events` (use a tunnel like `cloudflared`
+   for local dev), and subscribe to bot events `app_mention` and `message.im`.
+   Slack will send a `url_verification` challenge — the channel answers it
+   automatically.
+5. Run: `omni slack <agent-id> [--port 3000]`.
+
+How it works:
+- Every inbound request is verified with the signing secret (`v0=` HMAC
+  scheme, 5-minute timestamp tolerance); unverified requests get a 401.
+- `app_mention` events and fresh human `message` events (bot messages, edits,
+  and deletes are ignored) go to the agent with the leading `<@bot>` mention
+  stripped; the agent's reply is posted via `chat.postMessage`, threaded on
+  the incoming message (`thread_ts`).
+- `send(text)` posts to the channel/thread of the most recent inbound message.
+- Approvals for Slack-originated runs use the console y/n prompt
+  (`askApproval`) — run it where you can see the terminal.
+
 ## Approvals over channels
 
 - **Telegram:** interactive approval prompts (`ask` policy) arrive as

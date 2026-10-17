@@ -22,6 +22,15 @@ export interface XChannelOptions {
   pollIntervalMs?: number;
   /** Injectable for tests. */
   fetchImpl?: typeof fetch;
+  /** Injectable sleep for tests. */
+  sleepImpl?: (ms: number) => Promise<void>;
+}
+
+export interface XSearchResult {
+  id: string;
+  text: string;
+  authorId?: string;
+  createdAt?: string;
 }
 
 interface XMention {
@@ -56,6 +65,7 @@ export class XChannel implements Channel {
   private readonly accessTokenSecret: string;
   private readonly pollIntervalMs: number;
   private readonly fetchImpl: typeof fetch;
+  private readonly sleepImpl: (ms: number) => Promise<void>;
   private handler: ((text: string) => Promise<string | void>) | null = null;
   private running = false;
   private myUserId: string | null = null;
@@ -79,6 +89,7 @@ export class XChannel implements Channel {
     this.accessTokenSecret = opts.accessTokenSecret;
     this.pollIntervalMs = opts.pollIntervalMs ?? 120_000;
     this.fetchImpl = opts.fetchImpl ?? fetch;
+    this.sleepImpl = opts.sleepImpl ?? sleep;
   }
 
   onMessage(handler: (text: string) => Promise<string | void>): void {
@@ -99,6 +110,39 @@ export class XChannel implements Channel {
     }
   }
 
+  /**
+   * Bulk search recent posts (X API v2 `tweets/search/recent`, OAuth 1.0a
+   * signed). Returns newest-first results; on a 429 the retry-after backoff
+   * is honored once before giving up.
+   */
+  async search(query: string, opts: { maxResults?: number } = {}): Promise<XSearchResult[]> {
+    if (!query.trim()) throw new Error('X search: query must be non-empty');
+    const maxResults = Math.min(Math.max(Math.floor(opts.maxResults ?? 10), 1), 100);
+    const params = {
+      query,
+      max_results: String(maxResults),
+      'tweet.fields': 'created_at,author_id',
+    };
+    let res = await this.request('GET', '/tweets/search/recent', { query: params });
+    if (res.status === 429) {
+      const retryAfterMs = Math.min(Number(res.headers.get('retry-after') ?? '60') * 1000, 15 * 60_000);
+      console.error(`x search rate limited (429); backing off ${Math.round(retryAfterMs / 1000)}s`);
+      await this.sleepImpl(retryAfterMs);
+      res = await this.request('GET', '/tweets/search/recent', { query: params });
+    }
+    if (res.status === 429) throw new Error('X search failed: rate limited (429) after backoff');
+    if (res.status !== 200) throw new Error(`X search failed: HTTP ${res.status}`);
+    const body = (res.json ?? {}) as {
+      data?: Array<{ id: string; text: string; author_id?: string; created_at?: string }>;
+    };
+    return (body.data ?? []).map((t) => ({
+      id: t.id,
+      text: t.text,
+      authorId: t.author_id,
+      createdAt: t.created_at,
+    }));
+  }
+
   /** Start polling mentions. Resolves when stop() is called. */
   async start(): Promise<void> {
     if (!this.handler) throw new Error('XChannel: onMessage handler must be set before start()');
@@ -115,7 +159,7 @@ export class XChannel implements Channel {
         // Never crash the loop on a failed poll; credentials stay out of logs.
         console.error(`x poll error: ${err instanceof Error ? err.message : String(err)}`);
       }
-      await sleep(this.pollIntervalMs);
+      await this.sleepImpl(this.pollIntervalMs);
     }
   }
 
@@ -168,7 +212,7 @@ export class XChannel implements Channel {
     if (res.status === 429) {
       const retryAfterMs = Math.min(Number(res.headers.get('retry-after') ?? '60') * 1000, 15 * 60_000);
       console.error(`x rate limited (429); backing off ${Math.round(retryAfterMs / 1000)}s`);
-      await sleep(retryAfterMs);
+      await this.sleepImpl(retryAfterMs);
       return;
     }
     if (res.status !== 200) throw new Error(`X mentions failed: HTTP ${res.status}`);

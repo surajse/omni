@@ -63,6 +63,8 @@ pnpm exec omni run friday "remember that my favorite color is blue, then tell me
 | `OMNI_STT_BASE_URL` | STT base URL (default `https://api.openai.com/v1`) |
 | `OMNI_TTS_MODEL` / `OMNI_TTS_API_KEY` | TTS (e.g. `tts-1`) — enables audio replies |
 | `OMNI_TTS_BASE_URL` / `OMNI_TTS_VOICE` | TTS base URL / voice (default `alloy`) |
+| `SLACK_BOT_TOKEN` / `SLACK_SIGNING_SECRET` | Slack bot token + app signing secret for `omni slack` |
+| `OMNI_BROWSER_CDP_URL` | Chrome DevTools endpoint (`ws://…` or `http://host:9222`) — enables `browser.*` tools |
 | `OMNI_WEB_PORT` | Web console port (default `8080`; `omni web --port` overrides) |
 | `OMNI_WEB_TOKEN` | Optional web console token — when set, every `/` and `/api/*` request needs `?token=` (set one if you bind wider than localhost) |
 | `OMNI_TEAMS_ROOT` | Teams root dir (default `~/.omni/teams`); point at a shared git repo / synced folder |
@@ -181,6 +183,40 @@ omni group chat launch-team
 See [docs/WATCHERS.md](docs/WATCHERS.md), [docs/PACKS.md](docs/PACKS.md),
 [docs/GROUPS.md](docs/GROUPS.md).
 
+## v1.3: browser tool, Slack, provider router, X search
+
+```sh
+# Browser: real browser automation over CDP (the gap every rival had)
+docker build -f packages/browser/Dockerfile.browser -t omni-browser .
+docker run -d --name omni-browser -p 9222:9222 omni-browser
+export OMNI_BROWSER_CDP_URL=http://localhost:9222
+omni run scout "open https://example.com and tell me the main heading"
+# → browser.open / browser.snapshot / browser.click / browser.type
+#    (write-class: ask by default; attach only when OMNI_BROWSER_CDP_URL is set)
+
+# Slack: serve the agent in your workspace (Events API, HMAC-verified)
+omni slack scout --port 3000
+
+# Provider router: per-task model selection + fallback, in the agent JSON
+# ~/.omni/agents/<id>/agent.json:
+#   "model": { "model": "code-review" },          ← model *reference*
+#   "providers": [
+#     { "id": "openai", "baseUrl": "https://api.openai.com/v1",
+#       "apiKeyEnv": "OPENAI_API_KEY", "models": ["gpt-4o-mini"] },
+#     { "id": "groq", "baseUrl": "https://api.groq.com/openai/v1",
+#       "apiKeyEnv": "GROQ_API_KEY", "models": ["llama-3.3-70b"] }
+#   ],
+#   "routing": [{ "match": "^code-", "providerId": "groq" }]
+# Resolution: "<id>:<model>" prefix → routing regex → models list → first entry.
+# On 429/5xx/network errors the router falls back (max 2) and logs the switch.
+
+# X bulk search (Grok Bot's native-X-search answer, on your own keys)
+omni x-search "omni agents" --max 25
+```
+
+See [docs/BROWSER.md](docs/BROWSER.md) and [docs/CHANNELS.md](docs/CHANNELS.md)
+(Slack setup, X search).
+
 ## Repository layout
 
 ```
@@ -188,6 +224,8 @@ packages/kernel/            Agent loop, providers, tool gateway, policy engine, 
 packages/memory/            SQLite key/value + vector memory (embeddings client, cosine)
 packages/plugin-spec/       Plugin manifest schema + validator (+ example)
 packages/channels/          Channel abstraction + console channel
+packages/channels-slack/     Slack Events API channel (HMAC-verified webhook, threaded replies)
+packages/browser/           Real browser automation over CDP (open/snapshot/click/type) + Dockerfile.browser
 packages/sandbox/           Per-agent Docker computers (hardened) + computer-use tools
 packages/channels-telegram/ Telegram Bot API channel (long-polling, inline approvals)
 packages/channels-whatsapp/ WhatsApp Cloud API channel (webhook server)

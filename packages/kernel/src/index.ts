@@ -11,3 +11,4 @@ export * from './secrets.js';
 export * from './pack.js';
 export * from './docs.js';
 export * from './group.js';
+export * from './router.js';

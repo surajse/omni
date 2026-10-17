@@ -16,12 +16,15 @@ import {
   packAgent,
   PolicyEngine,
   registerDocTools,
+  RoutingProvider,
   RunRecorder,
   runGroupTurn,
   ToolGateway,
   registerHandoffTool,
   unpackAgent,
 } from '@omni/kernel';
+import { SlackChannel } from '@omni/channels-slack';
+import { CdpBrowserBackend, registerBrowserTools } from '@omni/browser';
 import type { AgentConfig, ApprovalHandler, HandoffMade, ModelProvider, RunEvent } from '@omni/kernel';
 import { SkillManager, learnSkillFromTranscript } from '@omni/skills';
 import type { Skill } from '@omni/skills';
@@ -80,7 +83,25 @@ function omniHome(): string {
   return home;
 }
 
-function buildProvider(): ModelProvider {
+/**
+ * Build the model provider for an agent. When the agent config carries
+ * `providers` (non-empty), the provider is a ModelRouter over those entries
+ * (per-task routing + fallback); otherwise the classic single-provider path
+ * (OMNI_* env, else mock) is used. The config arg is optional so bare
+ * `buildProvider()` keeps working.
+ */
+function buildProvider(config?: AgentConfig): ModelProvider {
+  const entries = config?.providers;
+  if (entries && entries.length > 0) {
+    return new RoutingProvider({
+      entries,
+      rules: config?.routing,
+      defaultModel: config?.model.model ?? 'mock',
+      onFallback: (info) => {
+        console.error(`provider fallback: ${info.from} -> ${info.to} (${info.reason.slice(0, 120)})`);
+      },
+    });
+  }
   const apiKey = process.env['OMNI_API_KEY'];
   if (apiKey) {
     return new OpenAICompatibleProvider({
@@ -223,9 +244,10 @@ export async function buildSubAgentWiring(
   if (opts.withSandbox) {
     await maybeAttachSandbox(gateway, target.id, { quiet: true, runtime: opts.runtime });
   }
+  await maybeAttachBrowser(gateway, { quiet: true });
   const config = withSkillPrompt(target, agentHomeDir(home, target.id));
   const deps = {
-    provider: buildProvider(),
+    provider: buildProvider(target),
     gateway,
     policy: new PolicyEngine(config.policy),
     approve: opts.approve,
@@ -246,6 +268,7 @@ async function createAgentStack(
   if (opts.withSandbox) {
     await maybeAttachSandbox(gateway, config.id);
   }
+  await maybeAttachBrowser(gateway);
   const registry = new AgentRegistry(join(home, 'agents'));
   registerHandoffTool(gateway, {
     registry,
@@ -258,7 +281,7 @@ async function createAgentStack(
   });
   const effective = withSkillPrompt(config, agentHomeDir(home, config.id));
   const agent = new Agent(effective, {
-    provider: buildProvider(),
+    provider: buildProvider(config),
     gateway,
     policy: new PolicyEngine(config.policy),
     approve: opts.approve,
@@ -303,6 +326,32 @@ async function maybeAttachSandbox(
   registerComputerTools(gateway, runtime, id);
   if (!opts.quiet) {
     console.log(`Sandbox ready: container ${id}`);
+  }
+}
+
+/**
+ * Best-effort: attach browser.* tools backed by a CDP endpoint. The endpoint
+ * comes from OMNI_BROWSER_CDP_URL (ws://… or http://host:9222, resolved via
+ * /json/list discovery). Warn and continue when unset or unreachable.
+ */
+async function maybeAttachBrowser(
+  gateway: ToolGateway,
+  opts: { quiet?: boolean } = {},
+): Promise<void> {
+  const url = process.env['OMNI_BROWSER_CDP_URL'];
+  if (!url) return; // browser tools stay off unless explicitly configured
+  try {
+    const backend = await CdpBrowserBackend.connect(url);
+    registerBrowserTools(gateway, backend);
+    if (!opts.quiet) {
+      console.log('Browser ready (CDP).');
+    }
+  } catch (err) {
+    if (!opts.quiet) {
+      console.error(
+        `Browser unavailable (${err instanceof Error ? err.message : String(err)}) — continuing without browser tools.`,
+      );
+    }
   }
 }
 
@@ -387,7 +436,7 @@ async function askApproval(question: string): Promise<boolean> {
 }
 
 function usage(): string {
-  return `omni — universal agent platform (v1.1)
+  return `omni — universal agent platform (v1.3)
 
 Usage:
   omni init --name <Name>                 Create a new agent (stored in ~/.omni/agents)
@@ -430,6 +479,8 @@ Usage:
   omni telegram <id>                      Serve the agent on Telegram (needs TELEGRAM_BOT_TOKEN)
   omni whatsapp <id> [--port N]           Serve the agent on WhatsApp Cloud API
   omni x <id> [--poll N]                  Watch X mentions and reply in thread (needs X_* env vars)
+  omni x-search "<query>" [--max N]       Search recent X posts (needs X_* env vars)
+  omni slack <id> [--port N]              Serve the agent on Slack Events API (needs SLACK_* env vars)
   omni sandbox exec <id> "<command>"      Run a command in the agent's Docker sandbox
 
 Environment:
@@ -452,6 +503,9 @@ Environment:
   X_ACCESS_TOKEN          X user access token
   X_ACCESS_TOKEN_SECRET   X user access token secret
   X_POLL_SECONDS          Mention poll interval for "omni x" (default: 120)
+  SLACK_BOT_TOKEN         Slack bot token (xoxb-…) for "omni slack"
+  SLACK_SIGNING_SECRET    Slack app signing secret (Events API verification)
+  OMNI_BROWSER_CDP_URL    Chrome DevTools endpoint (ws://… or http://host:9222); enables browser.* tools
   OMNI_STT_MODEL          STT model for voice (e.g. whisper-1); enables Telegram voice
   OMNI_STT_API_KEY        API key for the STT endpoint
   OMNI_STT_BASE_URL       STT endpoint base URL (default: https://api.openai.com/v1)
@@ -513,7 +567,7 @@ async function cmdChat(id: string): Promise<void> {
   const { gateway, memory } = buildGateway(home);
   try {
     const agent = new Agent(config, {
-      provider: buildProvider(),
+      provider: buildProvider(config),
       gateway,
       policy: new PolicyEngine(config.policy),
       approve: (req) => askApproval(`Allow tool "${req.tool}" with args ${JSON.stringify(req.args)}?`),
@@ -874,7 +928,7 @@ async function cmdWeb(portOpt: number | undefined): Promise<void> {
       });
       const effective = withSkillPrompt(config, agentHomeDir(home, config.id));
       return new Agent(effective, {
-        provider: buildProvider(),
+        provider: buildProvider(config),
         gateway,
         policy: new PolicyEngine(config.policy),
         approve: hooks.approve,
@@ -907,22 +961,41 @@ async function cmdWeb(portOpt: number | undefined): Promise<void> {
   });
 }
 
-async function cmdX(id: string, rest: string[]): Promise<void> {
+/** The four X_* credential env vars; exits(1) with a friendly message when any are missing. */
+function requireXEnv(): {
+  consumerKey: string;
+  consumerSecret: string;
+  accessToken: string;
+  accessTokenSecret: string;
+} {
+  const env = {
+    consumerKey: process.env['X_API_KEY'],
+    consumerSecret: process.env['X_API_SECRET'],
+    accessToken: process.env['X_ACCESS_TOKEN'],
+    accessTokenSecret: process.env['X_ACCESS_TOKEN_SECRET'],
+  };
   const missing = (
     [
-      ['X_API_KEY', process.env['X_API_KEY']],
-      ['X_API_SECRET', process.env['X_API_SECRET']],
-      ['X_ACCESS_TOKEN', process.env['X_ACCESS_TOKEN']],
-      ['X_ACCESS_TOKEN_SECRET', process.env['X_ACCESS_TOKEN_SECRET']],
+      ['X_API_KEY', env.consumerKey],
+      ['X_API_SECRET', env.consumerSecret],
+      ['X_ACCESS_TOKEN', env.accessToken],
+      ['X_ACCESS_TOKEN_SECRET', env.accessTokenSecret],
     ] as const
   )
     .filter(([, v]) => !v)
     .map(([k]) => k);
   if (missing.length > 0) {
     console.error(`Missing X credentials: ${missing.join(', ')}`);
-    console.error('Create an app at https://developer.x.com, authorize a user, then set the four X_* env vars (see docs/CHANNELS.md).');
+    console.error(
+      'Create an app at https://developer.x.com, authorize a user, then set the four X_* env vars (see docs/CHANNELS.md).',
+    );
     process.exit(1);
   }
+  return env as { consumerKey: string; consumerSecret: string; accessToken: string; accessTokenSecret: string };
+}
+
+async function cmdX(id: string, rest: string[]): Promise<void> {
+  const creds = requireXEnv();
   const pollIdx = rest.indexOf('--poll');
   const pollSeconds = pollIdx >= 0 ? Number(rest[pollIdx + 1]) : Number(process.env['X_POLL_SECONDS'] ?? '120');
   if (!Number.isFinite(pollSeconds) || pollSeconds < 15) {
@@ -932,10 +1005,10 @@ async function cmdX(id: string, rest: string[]): Promise<void> {
   const home = omniHome();
   const config = getAgentConfig(home, id);
   const channel = new XChannel({
-    consumerKey: process.env['X_API_KEY']!,
-    consumerSecret: process.env['X_API_SECRET']!,
-    accessToken: process.env['X_ACCESS_TOKEN']!,
-    accessTokenSecret: process.env['X_ACCESS_TOKEN_SECRET']!,
+    consumerKey: creds.consumerKey,
+    consumerSecret: creds.consumerSecret,
+    accessToken: creds.accessToken,
+    accessTokenSecret: creds.accessTokenSecret,
     pollIntervalMs: pollSeconds * 1000,
   });
   // No interactive UI for X-originated runs: console y/n approvals.
@@ -965,6 +1038,106 @@ async function cmdX(id: string, rest: string[]): Promise<void> {
   } finally {
     memory.close();
   }
+}
+
+/** Parse `--max N` (default 10, clamped 1..100 by the channel); throws on bad input. */
+function parseMaxResults(rest: string[]): number {
+  const i = rest.indexOf('--max');
+  if (i < 0) return 10;
+  const n = Number(rest[i + 1]);
+  if (!Number.isInteger(n) || n < 1) throw new Error('--max must be a positive integer');
+  return n;
+}
+
+async function cmdXSearch(query: string | undefined, rest: string[]): Promise<void> {
+  if (!query) {
+    console.error('usage: omni x-search "<query>" [--max N]');
+    process.exit(1);
+  }
+  let max: number;
+  try {
+    max = parseMaxResults(rest);
+  } catch (err) {
+    console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+  const creds = requireXEnv();
+  const channel = new XChannel({ ...creds });
+  let hits;
+  try {
+    hits = await channel.search(query, { maxResults: max });
+  } catch (err) {
+    console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+  if (hits.length === 0) {
+    console.log('(no results)');
+    return;
+  }
+  for (const h of hits) {
+    const meta = [h.id, h.authorId ? `@${h.authorId}` : null, h.createdAt ?? null]
+      .filter(Boolean)
+      .join(' · ');
+    console.log(`${meta}\n  ${h.text.replace(/\n/g, '\n  ')}\n`);
+  }
+}
+
+async function cmdSlack(id: string, rest: string[]): Promise<void> {
+  const botToken = process.env['SLACK_BOT_TOKEN'];
+  const signingSecret = process.env['SLACK_SIGNING_SECRET'];
+  const missing = [
+    ['SLACK_BOT_TOKEN', botToken],
+    ['SLACK_SIGNING_SECRET', signingSecret],
+  ]
+    .filter(([, v]) => !v)
+    .map(([k]) => k);
+  if (missing.length > 0) {
+    console.error(`Missing Slack credentials: ${missing.join(', ')}`);
+    console.error('Create a Slack app, enable Events API, and set the env vars (see docs/CHANNELS.md).');
+    process.exit(1);
+  }
+  let port: number | undefined;
+  try {
+    port = parsePort(rest);
+  } catch (err) {
+    console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+  const home = omniHome();
+  const config = getAgentConfig(home, id);
+  const { agent, memory } = await createAgentStack(home, config, {
+    approve: (req) => askApproval(`[slack] Allow tool "${req.tool}" with args ${JSON.stringify(req.args)}?`),
+    onEvent: progressEvents(),
+    withSandbox: true,
+  });
+  const channel = new SlackChannel({ botToken: botToken ?? '', signingSecret: signingSecret ?? '' });
+  channel.onMessage(async (text) => {
+    try {
+      return (await agent.run(text, { maxSteps: 8 })) || '(no reply)';
+    } catch (err) {
+      return `Error: ${friendlyError(err)}`;
+    }
+  });
+  const listenPort = port ?? 3000;
+  try {
+    await channel.start(listenPort);
+  } catch (err) {
+    console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+  console.log(`Slack events live for ${config.name} (${config.id}) on port ${listenPort}. Ctrl+C to stop.`);
+  console.log('Point your Slack app\'s Events URL at this port (use a tunnel like cloudflared for local dev).');
+  const shutdown = (): void => {
+    void channel.stop().finally(() => {
+      memory.close();
+      process.exit(0);
+    });
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+  await new Promise<never>(() => {
+    // run until a signal arrives
+  });
 }
 
 async function cmdSandboxExec(agentId: string, command: string): Promise<void> {
@@ -1618,6 +1791,14 @@ function cmdDoctor(): void {
     const set = !!process.env[v];
     rows.push([v, set, set ? 'set' : 'not set']);
   }
+  for (const v of ['SLACK_BOT_TOKEN', 'SLACK_SIGNING_SECRET']) {
+    const set = !!process.env[v];
+    rows.push([v, set, set ? 'set' : 'not set']);
+  }
+  {
+    const url = process.env['OMNI_BROWSER_CDP_URL'];
+    rows.push(['OMNI_BROWSER_CDP_URL', !!url, url ? 'set (browser tools attach)' : 'not set (browser tools off)']);
+  }
   const voiceCfg = voiceConfigFromEnv();
   rows.push(['voice (STT)', !!voiceCfg, voiceCfg ? `model ${voiceCfg.stt.model}` : 'not configured (OMNI_STT_MODEL/OMNI_STT_API_KEY)']);
   rows.push(['voice (TTS)', !!voiceCfg?.tts, voiceCfg?.tts ? `model ${voiceCfg.tts.model}` : 'not configured (OMNI_TTS_MODEL/OMNI_TTS_API_KEY)']);
@@ -1837,6 +2018,16 @@ export async function main(argv: string[]): Promise<void> {
         process.exit(1);
       }
       await cmdX(rest[0], rest.slice(1));
+      break;
+    case 'x-search':
+      await cmdXSearch(rest[0], rest.slice(1));
+      break;
+    case 'slack':
+      if (!rest[0]) {
+        console.error('slack requires <agent-id>');
+        process.exit(1);
+      }
+      await cmdSlack(rest[0], rest.slice(1));
       break;
     case 'sandbox':
       if (rest[0] === 'exec') {
