@@ -7,15 +7,23 @@ import type { ToolGateway } from './tools.js';
 export interface HandoffOptions {
   registry: AgentRegistry;
   /**
-   * Build a fresh AgentDeps for the target agent. Called once per handoff;
-   * the returned gateway must be fresh (the nested handoff tool is registered
-   * into it with depth+1). Run-scoped approve/onEvent can be closed over here.
+   * Build wiring for the target agent. Called once per handoff; the returned
+   * gateway must be fresh (the nested handoff tool is registered into it with
+   * depth+1). May apply skill-prompt injection or other config transforms and
+   * return the effective config alongside the deps. Run-scoped approve/onEvent
+   * can be closed over here. May be async (e.g. when attaching a sandbox).
    */
-  makeDeps: (config: AgentConfig) => AgentDeps;
+  makeDeps: (config: AgentConfig) => HandoffMade | Promise<HandoffMade>;
   /** Maximum successful handoffs in one chain (default 3). */
   maxDepth?: number;
   /** Current depth of this tool instance (0 at the top level). */
   depth?: number;
+}
+
+/** What makeDeps returns: the effective sub-agent config plus its deps. */
+export interface HandoffMade {
+  config: AgentConfig;
+  deps: AgentDeps;
 }
 
 const HANDOFF_DEF: ToolDefinition = {
@@ -58,12 +66,12 @@ export function createHandoffTool(opts: HandoffOptions): {
       throw new Error('agent.handoff: "task" must be a non-empty string');
     }
     const target: AgentConfig = opts.registry.get(to); // throws "Unknown agent: <id>"
-    const deps = opts.makeDeps(target);
+    const made = await opts.makeDeps(target);
     // The sub-agent gets its own handoff tool at depth+1, so chains keep working
     // until the guard above fires with an explicit "depth exceeded" error.
     const nested = createHandoffTool({ ...opts, depth: depth + 1 });
-    deps.gateway.register(nested.def, nested.handler);
-    const sub = new Agent(target, deps);
+    made.deps.gateway.register(nested.def, nested.handler);
+    const sub = new Agent(made.config, made.deps);
     return await sub.run(task);
   }
 

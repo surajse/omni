@@ -20,9 +20,35 @@ interface TgUpdate {
     chat: { id: number };
     text?: string;
   };
+  callback_query?: {
+    id: string;
+    data?: string;
+    message?: { message_id: number; chat: { id: number } };
+  };
+}
+
+/** A tool-call approval request surfaced as inline buttons. */
+export interface TelegramApprovalRequest {
+  tool: string;
+  args: Record<string, unknown>;
+}
+
+interface PendingApproval {
+  resolve: (approved: boolean) => void;
+  chatId: number;
+  messageId: number;
+  tool: string;
 }
 
 const MAX_MESSAGE_LENGTH = 4000;
+
+/** Escape text for Telegram's HTML parse mode. */
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
 
 function chunkText(text: string, max: number): string[] {
   if (text.length <= max) return [text];
@@ -44,6 +70,12 @@ export class TelegramChannel implements Channel {
   private chatId: number | null = null;
   private running = false;
   private offset = 0;
+  private approvalSeq = 0;
+  private readonly pendingApprovals = new Map<string, PendingApproval>();
+  /** Message handlers currently running; stop() waits for them. */
+  private readonly inflight = new Set<Promise<void>>();
+  /** Set when stop() begins; late approval requests resolve false immediately. */
+  private stopping = false;
 
   constructor(opts: TelegramChannelOptions) {
     if (!opts.botToken) throw new Error('TelegramChannel: botToken is required');
@@ -104,9 +136,82 @@ export class TelegramChannel implements Channel {
 
   async stop(): Promise<void> {
     this.running = false;
+    this.stopping = true;
+    // A stopped channel must not leave runs hanging on approvals.
+    for (const [, pending] of this.pendingApprovals) pending.resolve(false);
+    this.pendingApprovals.clear();
+    // Wait for in-flight message handlers (they may be awaiting approvals).
+    await Promise.allSettled([...this.inflight]);
+  }
+
+  /**
+   * Ask the Telegram user to approve a tool call. Sends the question with
+   * inline Approve/Deny buttons and resolves when the user taps one.
+   * Wire this into the agent's approve callback for Telegram-originated runs.
+   */
+  async requestApproval(req: TelegramApprovalRequest): Promise<boolean> {
+    if (this.chatId === null) {
+      throw new Error('TelegramChannel: no chat bound yet — requestApproval needs an incoming message first');
+    }
+    const approvalId = `a${++this.approvalSeq}`;
+    const argsJson = JSON.stringify(req.args, null, 2).slice(0, 1500);
+    const res = await this.fetchImpl(`https://api.telegram.org/bot${this.botToken}/sendMessage`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: this.chatId,
+        text: `Approve tool call?\n<b>${escapeHtml(req.tool)}</b>\n<pre>${escapeHtml(argsJson)}</pre>`,
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: '✅ Approve', callback_data: `omni:approve:${approvalId}` },
+              { text: '❌ Deny', callback_data: `omni:deny:${approvalId}` },
+            ],
+          ],
+        },
+      }),
+    });
+    if (!res.ok) throw new Error(`Telegram sendMessage failed: HTTP ${res.status}`);
+    const data = (await res.json()) as { result?: { message_id?: number } };
+    const messageId = data.result?.message_id ?? 0;
+    const chatId = this.chatId;
+    return new Promise<boolean>((resolve) => {
+      // If stop() already began, never leave the caller hanging.
+      if (this.stopping) {
+        resolve(false);
+        return;
+      }
+      this.pendingApprovals.set(approvalId, { resolve, chatId, messageId, tool: req.tool });
+    });
+  }
+
+  /** Pending approvals (for inspection/debugging). */
+  pendingApprovalCount(): number {
+    return this.pendingApprovals.size;
+  }
+
+  private async answerCallback(callbackQueryId: string, text?: string): Promise<void> {
+    await this.fetchImpl(`https://api.telegram.org/bot${this.botToken}/answerCallbackQuery`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ callback_query_id: callbackQueryId, text }),
+    });
+  }
+
+  private async editMessage(chatId: number, messageId: number, text: string): Promise<void> {
+    await this.fetchImpl(`https://api.telegram.org/bot${this.botToken}/editMessageText`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, message_id: messageId, text, parse_mode: 'HTML' }),
+    });
   }
 
   private async handleUpdate(update: TgUpdate): Promise<void> {
+    if (update.callback_query) {
+      await this.handleCallbackQuery(update.callback_query);
+      return;
+    }
     const msg = update.message;
     if (!msg?.text || !this.handler) return;
     const fromId = msg.from?.id;
@@ -114,9 +219,48 @@ export class TelegramChannel implements Channel {
       return; // silently ignore users outside the allowlist
     }
     this.chatId = msg.chat.id;
-    const reply = await this.handler(msg.text);
+    // Fire-and-forget: the handler may block on requestApproval(), which needs
+    // the poll loop to keep running so the user's button tap can arrive.
+    // stop() waits for in-flight handlers, so shutdown stays clean.
+    const task = this.handleMessage(msg.text);
+    this.inflight.add(task);
+    task.then(
+      () => this.inflight.delete(task),
+      (err: unknown) => {
+        this.inflight.delete(task);
+        console.error(`telegram message handler error: ${err instanceof Error ? err.message : String(err)}`);
+      },
+    );
+  }
+
+  private async handleMessage(text: string): Promise<void> {
+    const reply = await this.handler?.(text);
     if (typeof reply === 'string' && reply.length > 0) {
       await this.send(reply);
     }
+  }
+
+  private async handleCallbackQuery(
+    query: NonNullable<TgUpdate['callback_query']>,
+  ): Promise<void> {
+    const match = /^omni:(approve|deny):([A-Za-z0-9]+)$/.exec(query.data ?? '');
+    if (!match) {
+      await this.answerCallback(query.id);
+      return;
+    }
+    const approved = match[1] === 'approve';
+    const pending = this.pendingApprovals.get(match[2] ?? '');
+    if (pending) {
+      this.pendingApprovals.delete(match[2] ?? '');
+      pending.resolve(approved);
+      await this.editMessage(
+        pending.chatId,
+        pending.messageId,
+        approved
+          ? `✅ Approved: <b>${escapeHtml(pending.tool)}</b>`
+          : `❌ Denied: <b>${escapeHtml(pending.tool)}</b>`,
+      );
+    }
+    await this.answerCallback(query.id, approved ? 'Approved' : 'Denied');
   }
 }

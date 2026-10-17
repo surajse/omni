@@ -16,7 +16,7 @@
   "name": "@omni/memory",
   "type": "module",
   "types": "./dist/src/index.d.ts",
-  "version": "0.4.0",
+  "version": "1.0.0",
   "dependencies": {
     "@omni/kernel": "workspace:*"
   }

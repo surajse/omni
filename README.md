@@ -1,16 +1,26 @@
 # Omni — the universal open agent platform
 
-Omni is an open-source platform for building agents that work everywhere:
-one agent kernel, pluggable models, policy-gated tools, MCP servers,
-persistent memory, and channels (console today, chat apps tomorrow).
+**One agent. Every model. Every channel. Your machine.**
 
-**v0.1 scope: the agent kernel.** A provider-agnostic agent loop with
-explicit tool policies (allow / ask / deny), a file-backed agent registry,
-SQLite memory, an MCP stdio tool source, a plugin manifest spec, a console
-channel, and a CLI to drive it all. See [docs/ROADMAP.md](docs/ROADMAP.md)
-for where this is going.
+Omni is an open-source platform for agents that work everywhere: a
+provider-agnostic agent kernel with explicit allow/ask/deny tool policies,
+MCP tool servers, per-agent Docker computers, persistent + vector memory,
+skills learned from demonstration, agent-to-agent handoff, a plugin
+registry (including a real `.grok-plugin` importer), and channels spanning
+console, web, Telegram, and WhatsApp. No vendor lock-in, no mandatory
+cloud, no subscription meter.
 
-## Quickstart
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/surajse/omni/main/install.sh | bash
+# → omni init --name Friday
+```
+
+Or manually: `git clone https://github.com/surajse/omni && cd omni &&
+pnpm install && pnpm build`. Full guide: [docs/INSTALL.md](docs/INSTALL.md).
+
+## Quickstart (from source)
 
 Requirements: Node >= 22, pnpm >= 10.
 
@@ -20,16 +30,11 @@ node scripts/verify.mjs   # typecheck + lint + tests, all green
 pnpm build                # compile to dist/
 
 # Create an agent, list it, and run a task
-node apps/cli/dist/src/index.js init --name "Friday"
-node apps/cli/dist/src/index.js list
-node apps/cli/dist/src/index.js chat friday        # /quit to exit
-node apps/cli/dist/src/index.js run friday "remember that my favorite color is blue, then tell me the time"
-
-# Validate a plugin manifest
-node apps/cli/dist/src/index.js plugin validate packages/plugin-spec/plugins/examples/hello.omni-plugin.json
+pnpm exec omni init --name "Friday"
+pnpm exec omni list
+pnpm exec omni chat friday        # /quit to exit
+pnpm exec omni run friday "remember that my favorite color is blue, then tell me the time"
 ```
-
-Once built, the CLI is also available as `pnpm exec omni …`.
 
 ## Environment variables
 
@@ -39,6 +44,11 @@ Once built, the CLI is also available as `pnpm exec omni …`.
 | `OMNI_BASE_URL` | Endpoint base URL (default `https://api.openai.com/v1`) |
 | `OMNI_MODEL`    | Model name (default `gpt-4o-mini`)                   |
 | `OMNI_SANDBOX_IMAGE` | Docker image for agent sandboxes (default `ubuntu:24.04`) |
+| `OMNI_SANDBOX_MEMORY` | Sandbox memory limit (default `1g`) |
+| `OMNI_SANDBOX_CPUS` | Sandbox CPU limit (default `1.0`) |
+| `OMNI_EMBED_MODEL` | Embedding model name — enables vector memory when set with `OMNI_EMBED_API_KEY` |
+| `OMNI_EMBED_API_KEY` | API key for the embeddings endpoint |
+| `OMNI_EMBED_BASE_URL` | Embeddings base URL (default `https://api.openai.com/v1`) |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token from @BotFather                |
 | `TELEGRAM_ALLOWED_USERS` | Comma-separated Telegram user ids (default: all) |
 | `WHATSAPP_TOKEN` | WhatsApp Cloud API access token                    |
@@ -118,21 +128,45 @@ every request) — set one if you ever bind wider than localhost.
 See [docs/REGISTRY.md](docs/REGISTRY.md), [docs/TEAMS.md](docs/TEAMS.md),
 [docs/PLUGIN_SPEC.md](docs/PLUGIN_SPEC.md).
 
+## v1.0: hardened, semantic, installable
+
+```sh
+# Hardened sandboxes: cap-drop=ALL, no-new-privileges, 1g/1.0 CPU, noexec /tmp
+omni sandbox exec friday "ls -la /home/agent"
+OMNI_SANDBOX_MEMORY=2g omni run friday "analyze this log"
+
+# Vector memory: semantic recall over everything the agent has done
+export OMNI_EMBED_MODEL=text-embedding-3-small OMNI_EMBED_API_KEY=...
+omni run friday "what did we conclude about the deploy last week?"
+
+# Sub-agents now get the full wiring: skills + sandbox, like top-level agents
+omni run friday "hand the research task to scout"
+
+# Telegram approvals arrive as Approve/Deny buttons in the chat
+omni telegram friday
+```
+
+See [docs/SANDBOX.md](docs/SANDBOX.md) (threat model), [CHANGELOG.md](CHANGELOG.md).
+
 ## Repository layout
 
 ```
-packages/kernel/            Agent loop, providers, tool gateway, policy engine, MCP source, registry
-packages/memory/            SQLite-backed namespaced memory store
+packages/kernel/            Agent loop, providers, tool gateway, policy engine, MCP sources, registry, handoff, packs
+packages/memory/            SQLite key/value + vector memory (embeddings client, cosine)
 packages/plugin-spec/       Plugin manifest schema + validator (+ example)
 packages/channels/          Channel abstraction + console channel
-packages/sandbox/           Per-agent Docker computers + computer-use tools
-packages/channels-telegram/ Telegram Bot API channel (long-polling)
+packages/sandbox/           Per-agent Docker computers (hardened) + computer-use tools
+packages/channels-telegram/ Telegram Bot API channel (long-polling, inline approvals)
 packages/channels-whatsapp/ WhatsApp Cloud API channel (webhook server)
 packages/scheduler/         Cron matcher, routine store, ticking scheduler
 packages/skills/            Learn skills from transcripts, manage them, inject into prompts
-apps/cli/                   `omni` command-line interface
+packages/registry/          Plugin registry: sources, search, one-command installs
+packages/importers/         .grok-plugin → .omni-plugin importer (real format)
+packages/teams/             Filesystem team sharing for agent packs
+apps/cli/                   `omni` command-line interface (npm: omni-agents)
 apps/web/                   Web console: node:http + SSE chat UI with approval queue
-docs/                       Architecture, plugin spec, security model, roadmap, channels, sandbox, skills, web
+docs/                       Architecture, install, publish, plugin spec, security, roadmap, …
+install.sh                  One-command installer (Linux/macOS, no sudo)
 ```
 
 ## Design principles

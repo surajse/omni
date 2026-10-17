@@ -11,7 +11,7 @@ import {
   createHandoffTool,
   registerHandoffTool,
   type AgentConfig,
-  type AgentDeps,
+  type HandoffMade,
   type RunEvent,
   type ToolCall,
 } from '../src/index.js';
@@ -37,7 +37,7 @@ interface Harness {
   constructed: string[];
   events: RunEvent[];
   scripts: Map<string, Array<{ text?: string; toolCalls?: ToolCall[] }>>;
-  makeDeps: (config: AgentConfig) => AgentDeps;
+  makeDeps: (config: AgentConfig) => HandoffMade;
 }
 
 function harness(ids: string[], opts: { maxDepth?: number } = {}): Harness {
@@ -52,14 +52,17 @@ function harness(ids: string[], opts: { maxDepth?: number } = {}): Harness {
     constructed,
     events,
     scripts,
-    makeDeps: (config: AgentConfig): AgentDeps => {
+    makeDeps: (config: AgentConfig): HandoffMade => {
       constructed.push(config.id);
       return {
-        provider: new MockProvider(scripts.get(config.id) ?? []),
-        gateway: new ToolGateway(),
-        policy: new PolicyEngine([]),
-        approve: async () => true,
-        onEvent: (e) => events.push(e),
+        config,
+        deps: {
+          provider: new MockProvider(scripts.get(config.id) ?? []),
+          gateway: new ToolGateway(),
+          policy: new PolicyEngine([]),
+          approve: async () => true,
+          onEvent: (e) => events.push(e),
+        },
       };
     },
   };
@@ -144,5 +147,39 @@ describe('agent.handoff', () => {
     expect(def.name).toBe('agent.handoff');
     expect(def.readOnly).toBe(false);
     expect(def.parameters).toHaveProperty('properties.to_agent');
+  });
+
+  it('runs the sub-agent with the effective config returned by makeDeps', async () => {
+    const h = harness(['a', 'b']);
+    h.scripts.set('a', [{ toolCalls: [handoffCall('b')] }, { text: 'A done' }]);
+    // Sub-agent echoes the system prompt it was constructed with.
+    h.scripts.set('b', [{ text: 'SUB-PROMPT-ECHO' }]);
+    const seenPrompts: string[] = [];
+    const gateway = new ToolGateway();
+    registerHandoffTool(gateway, {
+      registry: h.registry,
+      makeDeps: (config) => {
+        const effective = { ...config, systemPrompt: `${config.systemPrompt}\n[INJECTED]` };
+        const deps = h.makeDeps(config).deps;
+        // Wrap the provider so we can observe the effective system prompt.
+        const inner = deps.provider;
+        deps.provider = {
+          name: inner.name,
+          complete: async (req) => {
+            seenPrompts.push(req.messages[0]?.content ?? '');
+            return inner.complete(req);
+          },
+        };
+        return { config: effective, deps };
+      },
+    });
+    const agent = new Agent(h.registry.get('a'), {
+      provider: new MockProvider(h.scripts.get('a') ?? []),
+      gateway,
+      policy: new PolicyEngine([]),
+      approve: async () => true,
+    });
+    await agent.run('go');
+    expect(seenPrompts.some((p) => p.includes('[INJECTED]'))).toBe(true);
   });
 });

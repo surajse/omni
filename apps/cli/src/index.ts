@@ -19,14 +19,15 @@ import {
   registerHandoffTool,
   unpackAgent,
 } from '@omni/kernel';
-import type { AgentConfig, ApprovalHandler, ModelProvider, RunEvent } from '@omni/kernel';
+import type { AgentConfig, ApprovalHandler, HandoffMade, ModelProvider, RunEvent } from '@omni/kernel';
 import { SkillManager, learnSkillFromTranscript } from '@omni/skills';
 import type { Skill } from '@omni/skills';
 import { createWebServer } from '@omni/web';
-import { SqliteMemoryStore } from '@omni/memory';
+import { SqliteMemoryStore, embed } from '@omni/memory';
 import { validateManifest } from '@omni/plugin-spec';
 import { ConsoleChannel } from '@omni/channels';
 import { DockerRuntime, registerComputerTools } from '@omni/sandbox';
+import type { ContainerRuntime } from '@omni/sandbox';
 import { TelegramChannel } from '@omni/channels-telegram';
 import { WhatsAppCloudChannel } from '@omni/channels-whatsapp';
 import { RoutineStore, Scheduler, validateCron } from '@omni/scheduler';
@@ -182,6 +183,43 @@ interface AgentStack {
   memory: SqliteMemoryStore;
 }
 
+export interface SubAgentWiringOpts {
+  approve: ApprovalHandler;
+  onEvent?: (e: RunEvent) => void;
+  withSandbox: boolean;
+  /** Injectable for tests; defaults to DockerRuntime. */
+  runtime?: ContainerRuntime;
+}
+
+/**
+ * Wire a handoff sub-agent exactly like a top-level agent: standard tools,
+ * skill-prompt injection, and (when withSandbox) the Docker computer tools.
+ * This is the single wiring function — handoff sub-agents get identical
+ * treatment to top-level agents (the v0.3 limitation is gone).
+ */
+export async function buildSubAgentWiring(
+  home: string,
+  memory: SqliteMemoryStore,
+  target: AgentConfig,
+  opts: SubAgentWiringOpts,
+): Promise<HandoffMade> {
+  const gateway = new ToolGateway();
+  registerStandardTools(gateway, memory);
+  if (opts.withSandbox) {
+    await maybeAttachSandbox(gateway, target.id, { quiet: true, runtime: opts.runtime });
+  }
+  const config = withSkillPrompt(target, agentHomeDir(home, target.id));
+  const deps = {
+    provider: buildProvider(),
+    gateway,
+    policy: new PolicyEngine(config.policy),
+    approve: opts.approve,
+    memory,
+    onEvent: opts.onEvent,
+  };
+  return { config, deps };
+}
+
 /** Build an Agent with the standard tool gateway; optionally attach the Docker sandbox computer. */
 async function createAgentStack(
   home: string,
@@ -195,18 +233,12 @@ async function createAgentStack(
   const registry = new AgentRegistry(join(home, 'agents'));
   registerHandoffTool(gateway, {
     registry,
-    makeDeps: (target) => {
-      const subGateway = new ToolGateway();
-      registerStandardTools(subGateway, memory);
-      return {
-        provider: buildProvider(),
-        gateway: subGateway,
-        policy: new PolicyEngine(target.policy),
+    makeDeps: (target) =>
+      buildSubAgentWiring(home, memory, target, {
         approve: opts.approve,
-        memory,
         onEvent: opts.onEvent,
-      };
-    },
+        withSandbox: opts.withSandbox,
+      }),
   });
   const effective = withSkillPrompt(config, agentHomeDir(home, config.id));
   const agent = new Agent(effective, {
@@ -216,25 +248,46 @@ async function createAgentStack(
     approve: opts.approve,
     memory,
     onEvent: opts.onEvent,
+    embedder: buildEmbedder(),
   });
   return { agent, memory };
 }
 
+/**
+ * Build an embedder from env (OMNI_EMBED_MODEL + OMNI_EMBED_API_KEY).
+ * Returns undefined when not configured — vector memory stays off.
+ */
+function buildEmbedder(): ((texts: string[]) => Promise<number[][]>) | undefined {
+  const model = process.env['OMNI_EMBED_MODEL'];
+  const apiKey = process.env['OMNI_EMBED_API_KEY'];
+  if (!model || !apiKey) return undefined;
+  const baseUrl = process.env['OMNI_EMBED_BASE_URL'] ?? 'https://api.openai.com/v1';
+  return (texts: string[]) => embed(texts, { baseUrl, apiKey, model });
+}
+
 /** Best-effort: attach computer.* tools backed by Docker; warn and continue when Docker is missing. */
-async function maybeAttachSandbox(gateway: ToolGateway, agentId: string): Promise<void> {
-  const runtime = new DockerRuntime();
+async function maybeAttachSandbox(
+  gateway: ToolGateway,
+  agentId: string,
+  opts: { quiet?: boolean; runtime?: ContainerRuntime } = {},
+): Promise<void> {
+  const runtime = opts.runtime ?? new DockerRuntime();
   try {
     await runtime.ensureReady();
   } catch (err) {
-    console.error(
-      `Sandbox unavailable (${err instanceof Error ? err.message : String(err)}) — continuing without computer tools.`,
-    );
+    if (!opts.quiet) {
+      console.error(
+        `Sandbox unavailable (${err instanceof Error ? err.message : String(err)}) — continuing without computer tools.`,
+      );
+    }
     return;
   }
   const id = await runtime.create(agentId);
   if ((await runtime.status(id)) !== 'running') await runtime.start(id);
   registerComputerTools(gateway, runtime, id);
-  console.log(`Sandbox ready: container ${runtime.containerName(agentId)}`);
+  if (!opts.quiet) {
+    console.log(`Sandbox ready: container ${id}`);
+  }
 }
 
 /** Parse `routine add` args; throws on bad input (pure — tested). */
@@ -600,14 +653,16 @@ async function cmdTelegram(id: string): Promise<void> {
   }
   const home = omniHome();
   const config = getAgentConfig(home, id);
-  const { agent, memory } = await createAgentStack(home, config, {
-    approve: (req) => askApproval(`Allow tool "${req.tool}" with args ${JSON.stringify(req.args)}?`),
-    onEvent: progressEvents(),
-    withSandbox: true,
-  });
   const channel = new TelegramChannel({
     botToken: token,
     allowedUserIds: parseIdList(process.env['TELEGRAM_ALLOWED_USERS']),
+  });
+  // Approvals for Telegram-originated runs arrive as inline Approve/Deny
+  // buttons in the chat itself (no console access needed).
+  const { agent, memory } = await createAgentStack(home, config, {
+    approve: (req) => channel.requestApproval(req),
+    onEvent: progressEvents(),
+    withSandbox: true,
   });
   channel.onMessage(async (text) => {
     try {
@@ -749,18 +804,12 @@ async function cmdWeb(portOpt: number | undefined): Promise<void> {
       registerStandardTools(gateway, memory);
       registerHandoffTool(gateway, {
         registry,
-        makeDeps: (target) => {
-          const subGateway = new ToolGateway();
-          registerStandardTools(subGateway, memory);
-          return {
-            provider: buildProvider(),
-            gateway: subGateway,
-            policy: new PolicyEngine(target.policy),
+        makeDeps: (target) =>
+          buildSubAgentWiring(home, memory, target, {
             approve: hooks.approve,
-            memory,
             onEvent: hooks.onEvent,
-          };
-        },
+            withSandbox: true,
+          }),
       });
       const effective = withSkillPrompt(config, agentHomeDir(home, config.id));
       return new Agent(effective, {
@@ -770,6 +819,7 @@ async function cmdWeb(portOpt: number | undefined): Promise<void> {
         approve: hooks.approve,
         memory,
         onEvent: hooks.onEvent,
+        embedder: buildEmbedder(),
       });
     },
     host: '127.0.0.1',

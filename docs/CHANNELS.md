@@ -19,6 +19,11 @@ Notes:
 - Messages longer than Telegram's 4096-char limit are split automatically.
 - The bot token is never logged.
 - Poll errors back off (1s → 30s); `Ctrl+C` stops cleanly.
+- **Inline approvals (v1.0):** when a run hits an `ask`-gated tool, the
+  question arrives in the chat with **Approve / Deny buttons**. Tapping one
+  resolves the approval and edits the message to show the decision. No
+  console access needed. If the bot stops with approvals pending, they
+  resolve as denied so runs never hang.
 
 ## WhatsApp Cloud API (`@omni/channels-whatsapp`)
 
@@ -54,7 +59,9 @@ Security notes:
 
 ## Approvals over channels
 
-Interactive approval prompts (`ask` policy) still ask on the **console** where
-the channel command runs — not inside the chat app. For unattended operation
-use `omni routine run` (auto-skip, logged). Approvals delivered as chat
-messages are a v0.3 item (see ROADMAP).
+- **Telegram:** interactive approval prompts (`ask` policy) arrive as
+  Approve/Deny inline buttons in the chat itself (v1.0).
+- **Console / web:** approvals ask on the console where the command runs, or
+  via the web console's Approve/Deny queue (`omni web`).
+- For unattended operation use `omni routine run` (auto-skip, logged).
+- WhatsApp approvals as interactive messages are still future work.

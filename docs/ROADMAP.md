@@ -61,20 +61,36 @@
   `OMNI_WEB_TOKEN` for the web console (localhost-only by default)
 - CLI: `plugin` / `agent export|import` / `team` / `doctor` commands
 
-## v1.0 — The universal agent
+## v1.0 — Hardened, semantic, installable (this release)
 
-- Sandbox escape review (per-agent egress policy, image digest pinning)
-- Installers (one-command install per OS)
-- Hosted relay (share agents without self-hosting)
-- Vector memory (sqlite-vec, still local)
-- Approvals over chat channels (Telegram/WhatsApp buttons)
-- OpenDots dot importer; usage/cost tracking; signed plugin manifests
+- **Sandbox hardening:** `buildRunArgs()` applies `--cap-drop=ALL`,
+  `--security-opt=no-new-privileges:true`, `--memory=1g`, `--cpus=1.0`,
+  `--pids-limit=256`, `--tmpfs /tmp:rw,noexec,nosuid,size=256m` by default;
+  limits configurable (`OMNI_SANDBOX_MEMORY` / `OMNI_SANDBOX_CPUS`);
+  documented threat model in SANDBOX.md (what's mitigated, what's not —
+  kernel exploits, side channels, egress are honest residual risks)
+- **Vector memory:** `embed()` via any OpenAI-compatible `/embeddings`
+  endpoint + `cosine()`; `SqliteMemoryStore.rememberVec/semanticRecall`
+  (Float32-LE BLOBs, brute-force cosine — personal-scale honest);
+  kernel `Agent` accepts opt-in `embedder`, injects top-k semantic recall
+  and stores tool-result summaries as vectors (failures never break runs)
+- **Handoff completion:** sub-agents now get identical wiring to top-level
+  agents — skill-prompt injection + sandbox computer tools flow through
+  `buildSubAgentWiring()` (the v0.3 limitation is gone); maxDepth=3 kept
+- **Telegram inline approvals:** `ask` approvals arrive as Approve/Deny
+  inline-keyboard buttons; `callback_query` handling resolves them, edits the
+  message with the decision, answers the callback; `stop()` never strands a run
+- **Installers & release:** `install.sh` (curl|bash, Linux/macOS, no sudo);
+  `docs/INSTALL.md` + `docs/PUBLISH.md`; CLI published as `omni-agents`
+  (name verified free 2026-10-17); `CHANGELOG.md`; everything at `1.0.0`
 
-## v1.0 — The universal agent
+## What's next (post-1.0)
 
-- One agent, every surface: chat apps, voice, desktop, mobile, web
-- Bring-your-own-model with automatic fallback and eval harness
-- Hosted mode with the same policy engine and audit log
+- Hosted relay: share agents without self-hosting (same policy engine + audit log)
+- Mobile app (the agent in your pocket, on your server)
+- Marketplace curation: signed plugin manifests, review queue, usage/cost tracking
+- OpenDots dot importer; per-agent egress firewall; ANN vector index when
+  personal-scale brute force stops being enough
 - The "universal best tool" test: a new user goes from zero to a useful,
   memory-persisting, policy-guarded agent on their favorite channel in
   under five minutes — without reading docs.

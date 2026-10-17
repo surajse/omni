@@ -41,15 +41,37 @@ Key files in `packages/kernel/src`:
 
 | Package | Depends on | Role |
 | --- | --- | --- |
-| `@omni/kernel` | `@modelcontextprotocol/sdk` | Agent loop, tools, policy, MCP, registry |
-| `@omni/memory` | (none, `node:sqlite`) | Namespaced key/value memory |
+| `@omni/kernel` | `@modelcontextprotocol/sdk` | Agent loop, tools, policy, MCP, registry, handoff, packs |
+| `@omni/memory` | `@omni/kernel` (secrets), `node:sqlite` | Namespaced key/value + vector memory |
 | `@omni/plugin-spec` | (none) | Plugin manifest schema + validator |
 | `@omni/channels` | (none) | `Channel` interface + console channel |
-| `omni` (apps/cli) | all four (workspace) | CLI wiring it together |
+| `@omni/sandbox` | `@omni/kernel` | Per-agent Docker computers + computer-use tools |
+| `@omni/scheduler` | (none) | Cron matcher, routine store, ticking scheduler |
+| `@omni/skills` | `@omni/kernel` | Learn skills from transcripts, manage, inject |
+| `@omni/channels-telegram` | `@omni/channels` | Telegram Bot API (long-polling, inline approvals) |
+| `@omni/channels-whatsapp` | `@omni/channels` | WhatsApp Cloud API (webhook server) |
+| `@omni/registry` | `@omni/plugin-spec`, `@omni/importers` | Plugin registry: sources, search, installs |
+| `@omni/importers` | `@omni/plugin-spec` | `.grok-plugin` → `.omni-plugin` importer |
+| `@omni/teams` | `@omni/kernel` | Filesystem team sharing for agent packs |
+| `@omni/web` (apps/web) | `@omni/kernel` | Web console: node:http + SSE chat UI |
+| `omni-agents` (apps/cli) | all (workspace) | CLI wiring it together |
 
 The kernel deliberately does **not** depend on `@omni/memory`; it accepts any
-object with a `recall(namespace)` method (structural typing). The CLI wires
-the real `SqliteMemoryStore` in.
+object with a `recall(namespace)` method (structural typing), and detects
+vector capability (`rememberVec`/`semanticRecall`) structurally too. The CLI
+wires the real `SqliteMemoryStore` in.
+
+## Memory: key/value + vector
+
+`SqliteMemoryStore` keeps two tables: `memories` (exact key/value recall,
+injected wholesale) and `memory_vectors` (embeddings as Float32-LE BLOBs).
+`semanticRecall()` ranks by brute-force cosine similarity — honest at
+personal scale (hundreds of entries); ANN indexing is future work.
+
+The agent's `embedder` is opt-in (`OMNI_EMBED_MODEL` + `OMNI_EMBED_API_KEY`
+in the CLI): when present, the task is embedded for top-k semantic recall
+alongside key/value recall, and each tool-result summary is stored as a
+vector. Embedding failures are swallowed — they can never break a run.
 
 ## Data flow for a tool call
 

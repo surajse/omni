@@ -9,6 +9,10 @@ import { capOutput } from './runtime.js';
 export interface DockerRuntimeOptions {
   /** Container image. Defaults to OMNI_SANDBOX_IMAGE, then ubuntu:24.04. */
   image?: string;
+  /** Docker --memory limit (e.g. "1g"). Defaults to OMNI_SANDBOX_MEMORY, then "1g". */
+  memory?: string;
+  /** Docker --cpus limit (e.g. "1.0"). Defaults to OMNI_SANDBOX_CPUS, then "1.0". */
+  cpus?: string;
   /** Default per-exec timeout. Defaults to 60s. */
   timeoutMs?: number;
   /** Default per-stream output cap. Defaults to 64KB. */
@@ -35,13 +39,60 @@ interface DockerCallResult {
   exitCode: number;
 }
 
+export interface RunArgsOptions {
+  /** Host volume mounted at /home/agent (the agent's persistent disk). */
+  volume: string;
+  image: string;
+  memory: string;
+  cpus: string;
+}
+
+/**
+ * Build the `docker create` argv for an agent computer. Pure function (no I/O)
+ * so the hardening flags are unit-testable. The flags implement the sandbox
+ * threat model documented in docs/SANDBOX.md:
+ * - --cap-drop=ALL + --security-opt=no-new-privileges:true: no privilege escalation
+ * - --memory / --cpus / --pids-limit: resource-exhaustion containment
+ * - --tmpfs /tmp (rw,noexec,nosuid): writable scratch that cannot execute binaries
+ * - default bridge network only: no --network=host, no --privileged, no host bind-mounts
+ */
+export function buildRunArgs(agentId: string, opts: RunArgsOptions): string[] {
+  const name = `omni-${sanitizeAgentId(agentId)}`;
+  return [
+    'create',
+    '--name',
+    name,
+    '--cap-drop=ALL',
+    '--security-opt=no-new-privileges:true',
+    '--memory',
+    opts.memory,
+    '--cpus',
+    opts.cpus,
+    '--pids-limit',
+    '256',
+    '--tmpfs',
+    '/tmp:rw,noexec,nosuid,size=256m',
+    '-v',
+    `${opts.volume}:/home/agent`,
+    opts.image,
+    'sleep',
+    'infinity',
+  ];
+}
+
 export class DockerRuntime implements ContainerRuntime {
   private readonly image: string;
+  /** Resolved memory limit (constructor opt > OMNI_SANDBOX_MEMORY > "1g"). */
+  readonly memory: string;
+  /** Resolved cpu limit (constructor opt > OMNI_SANDBOX_CPUS > "1.0"). */
+  readonly cpus: string;
   private readonly timeoutMs: number;
   private readonly maxOutputBytes: number;
 
   constructor(opts: DockerRuntimeOptions = {}) {
     this.image = opts.image ?? process.env['OMNI_SANDBOX_IMAGE'] ?? 'ubuntu:24.04';
+    this.memory = opts.memory ?? process.env['OMNI_SANDBOX_MEMORY'] ?? '1g';
+    this.cpus = opts.cpus ?? process.env['OMNI_SANDBOX_CPUS'] ?? '1.0';
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.maxOutputBytes = opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
   }
@@ -110,16 +161,14 @@ export class DockerRuntime implements ContainerRuntime {
     if (vol.exitCode !== 0) {
       throw new Error(`docker volume create failed: ${vol.stderr.trim()}`);
     }
-    const created = await this.docker([
-      'create',
-      '--name',
-      name,
-      '-v',
-      `${volume}:/home/agent`,
-      this.image,
-      'sleep',
-      'infinity',
-    ]);
+    const created = await this.docker(
+      buildRunArgs(agentId, {
+        volume,
+        image: this.image,
+        memory: this.memory,
+        cpus: this.cpus,
+      }),
+    );
     if (created.exitCode !== 0) {
       throw new Error(`docker create failed: ${created.stderr.trim()}`);
     }
