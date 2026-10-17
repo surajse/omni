@@ -7,8 +7,9 @@ provider-agnostic agent kernel with explicit allow/ask/deny tool policies,
 MCP tool servers, per-agent Docker computers, persistent + vector memory,
 skills learned from demonstration, agent-to-agent handoff, group chat rooms,
 proactive watchers, per-agent document workspaces, one-command specialist
-packs, a plugin registry (including a real `.grok-plugin` importer), and
-channels spanning console, web, Telegram (with voice notes), WhatsApp, and X.
+packs, a plugin registry (including a real `.grok-plugin` importer),
+rich HTML artifacts, and channels spanning console, web, Telegram
+(with voice notes), WhatsApp, X, Slack, and email (Gmail API).
 No vendor lock-in, no mandatory cloud, no subscription meter.
 
 ## Install
@@ -65,6 +66,7 @@ pnpm exec omni run friday "remember that my favorite color is blue, then tell me
 | `OMNI_TTS_BASE_URL` / `OMNI_TTS_VOICE` | TTS base URL / voice (default `alloy`) |
 | `SLACK_BOT_TOKEN` / `SLACK_SIGNING_SECRET` | Slack bot token + app signing secret for `omni slack` |
 | `OMNI_BROWSER_CDP_URL` | Chrome DevTools endpoint (`ws://…` or `http://host:9222`) — enables `browser.*` tools |
+| `GMAIL_CLIENT_ID` / `GMAIL_CLIENT_SECRET` / `GMAIL_REFRESH_TOKEN` | Google OAuth creds for `omni email` (Gmail API) |
 | `OMNI_WEB_PORT` | Web console port (default `8080`; `omni web --port` overrides) |
 | `OMNI_WEB_TOKEN` | Optional web console token — when set, every `/` and `/api/*` request needs `?token=` (set one if you bind wider than localhost) |
 | `OMNI_TEAMS_ROOT` | Teams root dir (default `~/.omni/teams`); point at a shared git repo / synced folder |
@@ -217,6 +219,23 @@ omni x-search "omni agents" --max 25
 See [docs/BROWSER.md](docs/BROWSER.md) and [docs/CHANNELS.md](docs/CHANNELS.md)
 (Slack setup, X search).
 
+## v1.4: email channel, rich artifacts
+
+```sh
+# Email: serve the agent over Gmail (OAuth2, polling, threaded replies)
+export GMAIL_CLIENT_ID=... GMAIL_CLIENT_SECRET=... GMAIL_REFRESH_TOKEN=...
+omni email scout --poll 5 --query "is:unread newer_than:1d"
+
+# Artifacts: the agent saves rich static HTML for the web console
+# omni run scout "build me a Q3 report as an artifact"
+# → artifact.save / artifact.list (policy-gated, 512KB/file, 10MB total)
+# → web console Artifacts tab renders it in a fully-sandboxed iframe
+#    (no scripts — static documents only, by design)
+```
+
+See [docs/CHANNELS.md](docs/CHANNELS.md) (Gmail setup) and [docs/WEB.md](docs/WEB.md)
+(Artifacts tab).
+
 ## Repository layout
 
 ```
@@ -225,6 +244,7 @@ packages/memory/            SQLite key/value + vector memory (embeddings client,
 packages/plugin-spec/       Plugin manifest schema + validator (+ example)
 packages/channels/          Channel abstraction + console channel
 packages/channels-slack/     Slack Events API channel (HMAC-verified webhook, threaded replies)
+packages/channels-email/     Email channel over the Gmail REST API (polling, threaded replies, OAuth2)
 packages/browser/           Real browser automation over CDP (open/snapshot/click/type) + Dockerfile.browser
 packages/sandbox/           Per-agent Docker computers (hardened) + computer-use tools
 packages/channels-telegram/ Telegram Bot API channel (long-polling, inline approvals)

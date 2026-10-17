@@ -10,6 +10,8 @@ import {
   RunRecorder,
   listDocFiles,
   resolveDocPath,
+  listArtifactFiles,
+  resolveArtifactPath,
   type Agent,
   type AgentConfig,
   type AgentRegistry,
@@ -336,6 +338,55 @@ export function createWebServer(opts: WebServerOptions): WebServer {
       return;
     }
 
+    if (method === 'GET' && path === '/api/artifacts') {
+      const agentId = url.searchParams.get('agentId');
+      if (!agentId) {
+        json(res, 400, { error: 'agentId query param required' });
+        return;
+      }
+      try {
+        opts.registry.get(agentId);
+      } catch {
+        json(res, 404, { error: `unknown agent: ${agentId}` });
+        return;
+      }
+      json(res, 200, { files: listArtifactFiles(join(opts.agentHome(agentId), 'artifacts')) });
+      return;
+    }
+
+    if (method === 'GET' && path === '/api/artifacts/content') {
+      const agentId = url.searchParams.get('agentId');
+      const name = url.searchParams.get('name');
+      if (!agentId || !name) {
+        json(res, 400, { error: 'agentId and name query params required' });
+        return;
+      }
+      try {
+        opts.registry.get(agentId);
+      } catch {
+        json(res, 404, { error: `unknown agent: ${agentId}` });
+        return;
+      }
+      let abs: string;
+      try {
+        abs = resolveArtifactPath(join(opts.agentHome(agentId), 'artifacts'), name);
+      } catch (err) {
+        json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+        return;
+      }
+      let content: string;
+      try {
+        content = readFileSync(abs, 'utf8');
+      } catch {
+        json(res, 404, { error: `artifact not found: ${name}` });
+        return;
+      }
+      const bytes = Buffer.byteLength(content, 'utf8');
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': bytes });
+      res.end(content);
+      return;
+    }
+
     json(res, 404, { error: 'not found' });
   }
 
@@ -431,6 +482,13 @@ input[type=text] { width: 60%; padding: .3rem; }
 </div>
 <div id="docsList"></div>
 <div id="docView" style="border:1px solid #ddd;border-radius:6px;padding:.5rem 1rem;margin-top:.5rem;"></div>
+
+<h2>Artifacts</h2>
+<div class="row">
+  <button id="loadArtifactsBtn">Load artifacts for selected agent</button>
+</div>
+<div id="artifactsList"></div>
+<iframe id="artifactFrame" sandbox="" title="Artifact preview" style="width:100%;min-height:480px;border:1px solid #ddd;border-radius:6px;margin-top:.5rem;display:none;"></iframe>
 
 <script>
 // Token passthrough: the server may require ?token= on every route.
@@ -607,6 +665,33 @@ function loadDoc(agentId, path) {
     });
 }
 document.getElementById('loadDocsBtn').onclick = loadDocs;
+// --- Artifacts tab: list saved HTML, preview in a fully-sandboxed iframe ---
+// The iframe's sandbox attribute is intentionally empty: no scripts,
+// no same-origin, no forms. Artifacts are static documents (inline CSS/SVG),
+// never apps — this is a deliberate safety boundary (see docs/WEB.md).
+function loadArtifacts() {
+  var agentId = document.getElementById('agentSelect').value;
+  if (!agentId) return;
+  fetch(api('/api/artifacts?agentId=' + encodeURIComponent(agentId)))
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      var box = document.getElementById('artifactsList');
+      box.innerHTML = '';
+      (d.files || []).forEach(function (f) {
+        var b = document.createElement('button');
+        b.textContent = f;
+        b.onclick = function () { showArtifact(agentId, f); };
+        box.appendChild(b);
+      });
+      if ((d.files || []).length === 0) box.textContent = 'No artifacts yet. Ask the agent to save one with artifact.save.';
+    });
+}
+function showArtifact(agentId, name) {
+  var frame = document.getElementById('artifactFrame');
+  frame.style.display = 'block';
+  frame.src = api('/api/artifacts/content?agentId=' + encodeURIComponent(agentId) + '&name=' + encodeURIComponent(name));
+}
+document.getElementById('loadArtifactsBtn').onclick = loadArtifacts;
 document.getElementById('sendBtn').onclick = sendChat;
 document.getElementById('chatInput').addEventListener('keydown', function (e) {
   if (e.key === 'Enter') sendChat();

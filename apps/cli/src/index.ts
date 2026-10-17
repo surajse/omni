@@ -18,6 +18,7 @@ import {
   registerDocTools,
   RoutingProvider,
   RunRecorder,
+  registerArtifactTools,
   runGroupTurn,
   ToolGateway,
   registerHandoffTool,
@@ -38,6 +39,7 @@ import { TelegramChannel } from '@omni/channels-telegram';
 import type { VoiceHooks } from '@omni/channels-telegram';
 import { WhatsAppCloudChannel } from '@omni/channels-whatsapp';
 import { XChannel } from '@omni/channels-x';
+import { EmailChannel, DEFAULT_EMAIL_QUERY } from '@omni/channels-email';
 import { transcribe, speak, voiceConfigFromEnv } from '@omni/voice';
 import { RoutineStore, Scheduler, matchesCron, validateCron } from '@omni/scheduler';
 import type { Routine } from '@omni/scheduler';
@@ -179,6 +181,11 @@ function agentDocsDir(home: string, agentId: string): string {
   return join(agentHomeDir(home, agentId), 'docs');
 }
 
+/** Directory for an agent's rich HTML artifacts (web console Artifacts tab). */
+function agentArtifactsDir(home: string, agentId: string): string {
+  return join(agentHomeDir(home, agentId), 'artifacts');
+}
+
 /** Append the agent's learned skills to its system prompt (no-op when none). */
 function withSkillPrompt(config: AgentConfig, agentDir: string): AgentConfig {
   const fragment = new SkillManager(join(agentDir, 'skills')).promptFragment();
@@ -241,6 +248,7 @@ export async function buildSubAgentWiring(
   const gateway = new ToolGateway();
   registerStandardTools(gateway, memory);
   registerDocTools(gateway, agentDocsDir(home, target.id));
+  registerArtifactTools(gateway, agentArtifactsDir(home, target.id));
   if (opts.withSandbox) {
     await maybeAttachSandbox(gateway, target.id, { quiet: true, runtime: opts.runtime });
   }
@@ -265,6 +273,7 @@ async function createAgentStack(
 ): Promise<AgentStack> {
   const { gateway, memory } = buildGateway(home);
   registerDocTools(gateway, agentDocsDir(home, config.id));
+  registerArtifactTools(gateway, agentArtifactsDir(home, config.id));
   if (opts.withSandbox) {
     await maybeAttachSandbox(gateway, config.id);
   }
@@ -481,6 +490,7 @@ Usage:
   omni x <id> [--poll N]                  Watch X mentions and reply in thread (needs X_* env vars)
   omni x-search "<query>" [--max N]       Search recent X posts (needs X_* env vars)
   omni slack <id> [--port N]              Serve the agent on Slack Events API (needs SLACK_* env vars)
+  omni email <id> [--poll N] [--query "<q>"]  Serve the agent on email via Gmail API (needs GMAIL_* env vars)
   omni sandbox exec <id> "<command>"      Run a command in the agent's Docker sandbox
 
 Environment:
@@ -505,6 +515,9 @@ Environment:
   X_POLL_SECONDS          Mention poll interval for "omni x" (default: 120)
   SLACK_BOT_TOKEN         Slack bot token (xoxb-…) for "omni slack"
   SLACK_SIGNING_SECRET    Slack app signing secret (Events API verification)
+  GMAIL_CLIENT_ID         Google Cloud OAuth client id for "omni email"
+  GMAIL_CLIENT_SECRET     Google Cloud OAuth client secret
+  GMAIL_REFRESH_TOKEN     OAuth refresh token (Gmail API scopes)
   OMNI_BROWSER_CDP_URL    Chrome DevTools endpoint (ws://… or http://host:9222); enables browser.* tools
   OMNI_STT_MODEL          STT model for voice (e.g. whisper-1); enables Telegram voice
   OMNI_STT_API_KEY        API key for the STT endpoint
@@ -917,6 +930,7 @@ async function cmdWeb(portOpt: number | undefined): Promise<void> {
       const gateway = new ToolGateway();
       registerStandardTools(gateway, memory);
       registerDocTools(gateway, join(agentHomeDir(home, config.id), 'docs'));
+      registerArtifactTools(gateway, join(agentHomeDir(home, config.id), 'artifacts'));
       registerHandoffTool(gateway, {
         registry,
         makeDeps: (target) =>
@@ -1127,6 +1141,94 @@ async function cmdSlack(id: string, rest: string[]): Promise<void> {
   }
   console.log(`Slack events live for ${config.name} (${config.id}) on port ${listenPort}. Ctrl+C to stop.`);
   console.log('Point your Slack app\'s Events URL at this port (use a tunnel like cloudflared for local dev).');
+  const shutdown = (): void => {
+    void channel.stop().finally(() => {
+      memory.close();
+      process.exit(0);
+    });
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+  await new Promise<never>(() => {
+    // run until a signal arrives
+  });
+}
+
+function requireEmailEnv(): { clientId: string; clientSecret: string; refreshToken: string } {
+  const env = {
+    clientId: process.env['GMAIL_CLIENT_ID'],
+    clientSecret: process.env['GMAIL_CLIENT_SECRET'],
+    refreshToken: process.env['GMAIL_REFRESH_TOKEN'],
+  };
+  const missing = (
+    [
+      ['GMAIL_CLIENT_ID', env.clientId],
+      ['GMAIL_CLIENT_SECRET', env.clientSecret],
+      ['GMAIL_REFRESH_TOKEN', env.refreshToken],
+    ] as const
+  )
+    .filter(([, v]) => !v)
+    .map(([k]) => k);
+  if (missing.length > 0) {
+    console.error(`Missing Gmail credentials: ${missing.join(', ')}`);
+    console.error(
+      'Create a Google Cloud OAuth client, enable the Gmail API, and set the three GMAIL_* env vars (see docs/CHANNELS.md).',
+    );
+    process.exit(1);
+  }
+  return env as { clientId: string; clientSecret: string; refreshToken: string };
+}
+
+/** Parse `--poll <minutes>` (default 5); throws on bad input. */
+function parsePollMinutes(rest: string[]): number {
+  const i = rest.indexOf('--poll');
+  if (i < 0) return 5;
+  const n = Number(rest[i + 1]);
+  if (!Number.isFinite(n) || n <= 0) throw new Error('--poll must be a positive number of minutes');
+  return n;
+}
+
+/** Parse `--query "<gmail search>"`; defaults to unread mail from the last day. */
+function parseEmailQuery(rest: string[]): string {
+  const i = rest.indexOf('--query');
+  if (i < 0 || !rest[i + 1]) return DEFAULT_EMAIL_QUERY;
+  return rest[i + 1]!;
+}
+
+async function cmdEmail(id: string, rest: string[]): Promise<void> {
+  const creds = requireEmailEnv();
+  let pollMinutes: number;
+  try {
+    pollMinutes = parsePollMinutes(rest);
+  } catch (err) {
+    console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+  const query = parseEmailQuery(rest);
+  const home = omniHome();
+  const config = getAgentConfig(home, id);
+  const { agent, memory } = await createAgentStack(home, config, {
+    approve: (req) => askApproval(`[email] Allow tool "${req.tool}" with args ${JSON.stringify(req.args)}?`),
+    onEvent: progressEvents(),
+    withSandbox: true,
+  });
+  const channel = new EmailChannel({ creds, pollIntervalMs: pollMinutes * 60_000, query });
+  channel.onMessage(async (text) => {
+    try {
+      return (await agent.run(text, { maxSteps: 8 })) || '(no reply)';
+    } catch (err) {
+      return `Error: ${friendlyError(err)}`;
+    }
+  });
+  try {
+    await channel.start();
+  } catch (err) {
+    console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+  console.log(
+    `Email live for ${config.name} (${config.id}) as ${channel.ownEmail()} — polling "${query}" every ${pollMinutes}m. Ctrl+C to stop.`,
+  );
   const shutdown = (): void => {
     void channel.stop().finally(() => {
       memory.close();
@@ -1795,6 +1897,10 @@ function cmdDoctor(): void {
     const set = !!process.env[v];
     rows.push([v, set, set ? 'set' : 'not set']);
   }
+  for (const v of ['GMAIL_CLIENT_ID', 'GMAIL_CLIENT_SECRET', 'GMAIL_REFRESH_TOKEN']) {
+    const set = !!process.env[v];
+    rows.push([v, set, set ? 'set' : 'not set']);
+  }
   {
     const url = process.env['OMNI_BROWSER_CDP_URL'];
     rows.push(['OMNI_BROWSER_CDP_URL', !!url, url ? 'set (browser tools attach)' : 'not set (browser tools off)']);
@@ -2028,6 +2134,13 @@ export async function main(argv: string[]): Promise<void> {
         process.exit(1);
       }
       await cmdSlack(rest[0], rest.slice(1));
+      break;
+    case 'email':
+      if (!rest[0]) {
+        console.error('email requires <agent-id>');
+        process.exit(1);
+      }
+      await cmdEmail(rest[0], rest.slice(1));
       break;
     case 'sandbox':
       if (rest[0] === 'exec') {

@@ -152,17 +152,31 @@ experience gaps — each a direct answer to a rival's best weapon:
 - Honestly out (stays out): realtime voice calls (theater without a telephony
   provider); hosted relay (local-first thesis).
 
-## What's next (post-1.3)
+## What's next (post-1.4)
 
-- **v1.4: email channel + rich artifacts console** — bring-your-own-mailbox
-  channel (the agent-owned-inbox primitive, done honestly); sandboxed iframe
-  rendering of agent-produced HTML in the web console.
+- **v1.4: email channel + rich artifacts console (this release)**
+  - `@omni/channels-email` (zero deps): Gmail REST API channel — polling with
+    configurable search query, MIME parsing (text/plain from multipart),
+    threaded replies (`In-Reply-To`/`References`), mark-read, OAuth2 refresh
+    via `GMAIL_CLIENT_ID`/`GMAIL_CLIENT_SECRET`/`GMAIL_REFRESH_TOKEN`;
+    `omni email <id> [--poll 5] [--query "<q>"]`; `omni doctor` rows.
+    Hand-rolled IMAP deliberately NOT built (error-prone).
+  - Rich artifacts: kernel `artifact.save` / `artifact.list` tools
+    (write-class, path-jailed, 512KB/file + 10MB/dir caps) wired into every
+    agent stack; web console Artifacts tab renders in `<iframe sandbox="">`
+    (no scripts — static HTML only, documented as a safety boundary).
 - Marketplace curation: signed plugin manifests, review queue, usage/cost tracking
 - OpenDots dot importer; per-agent egress firewall; ANN vector index when
   personal-scale brute force stops being enough
 - The "universal best tool" test: a new user goes from zero to a useful,
   memory-persisting, policy-guarded agent on their favorite channel in
   under five minutes — without reading docs.
+
+## v1.5 — TBD
+
+Driven by the next gap review, not committed in advance. Realtime voice
+calls and the hosted relay stay explicitly out until a real telephony
+provider / an explicit opt-in design exists — no theater.
 
 Non-goals: Omni will not become a model lab. The kernel stays
 provider-agnostic; intelligence comes from the model you plug in.

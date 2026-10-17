@@ -28,6 +28,7 @@ export default defineConfig({
       '@omni/channels-x': src('channels-x'),
       '@omni/browser': src('browser'),
       '@omni/channels-slack': src('channels-slack'),
+      '@omni/channels-email': src('channels-email'),
     },
   },
   test: {

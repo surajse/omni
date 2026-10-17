@@ -10,5 +10,6 @@ export * from './handoff.js';
 export * from './secrets.js';
 export * from './pack.js';
 export * from './docs.js';
+export * from './artifacts.js';
 export * from './group.js';
 export * from './router.js';

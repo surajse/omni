@@ -134,6 +134,44 @@ How it works:
 - Approvals for Slack-originated runs use the console y/n prompt
   (`askApproval`) — run it where you can see the terminal.
 
+## Email — Gmail API (`@omni/channels-email`)
+
+Serves the agent over email, backed by the Gmail REST API v1 — zero
+dependencies. Deliberately NOT hand-rolled IMAP (error-prone); the Gmail API
+is the supported path. Inbound: polls for unread mail (configurable Gmail
+search query), parses From/Subject/body, dispatches each new message to the
+agent, and marks it read afterwards (configurable). Outbound: the agent's
+reply goes back as a threaded email reply (`In-Reply-To` / `References`).
+
+Setup (one-time, at [console.cloud.google.com](https://console.cloud.google.com)):
+
+1. **Create a project**, enable the **Gmail API**.
+2. Under **APIs & Services → Credentials**, create an **OAuth client ID**
+   (Desktop app): note the **client id** (`GMAIL_CLIENT_ID`) and **client
+   secret** (`GMAIL_CLIENT_SECRET`).
+3. Under **OAuth consent screen**, add the scopes
+   `https://www.googleapis.com/auth/gmail.readonly`,
+   `https://www.googleapis.com/auth/gmail.send`, and
+   `https://www.googleapis.com/auth/gmail.modify`.
+4. Get a **refresh token**: use the
+   [OAuth 2.0 Playground](https://developers.google.com/oauthplayground)
+   (select the same scopes, exchange the code) or `gcloud auth
+   application-default login --scopes=...`. Store it as
+   `GMAIL_REFRESH_TOKEN`. Expect an "unverified app" warning for personal
+   use — click through only for your own account.
+5. Run: `omni email <agent-id> [--poll 5] [--query "is:unread newer_than:1d"]`.
+
+How it works:
+- Access tokens are refreshed automatically via the refresh token; secrets
+  are only ever sent to Google's token endpoint and Gmail API, never logged.
+- Seen message ids are in-memory — a restart may re-see recent mail.
+- The agent's own sent mail is skipped (no self-reply loops).
+- `send(text)` replies (threaded) to the most recent inbound email.
+- **Sending limits / anti-spam:** automated sending must respect Gmail's
+  sending limits (a few hundred/day for consumer accounts, higher for
+  Workspace) and anti-spam rules — keep replies to genuine inbound mail,
+  never bulk-send. Abuse risks the Google account.
+
 ## Approvals over channels
 
 - **Telegram:** interactive approval prompts (`ask` policy) arrive as

@@ -2,6 +2,52 @@
 
 All notable changes to Omni. Format: Keep a Changelog.
 
+## [1.4.0] — 2026-10-17
+
+**Email channel, rich artifacts** — the v1.4 scope from the 2026-10-17 gap
+review (agent-owned inbox is October's hot primitive; artifacts answer the
+generative-UI wave without cloning it).
+
+### Added
+- Email channel (`@omni/channels-email`, zero deps): Gmail REST API v1 over
+  pure HTTPS — polling with a configurable search query (default
+  `is:unread newer_than:1d`), full-message fetch with MIME parsing
+  (text/plain picked from multipart, base64url decoded, 256KB cap),
+  threaded replies (`In-Reply-To` / `References` / `threadId`), mark-read
+  after handling (configurable), self-mail skip, in-memory seen-ids.
+  OAuth2 via `GMAIL_CLIENT_ID` / `GMAIL_CLIENT_SECRET` /
+  `GMAIL_REFRESH_TOKEN` with automatic token refresh (401 → refresh →
+  retry); secrets only ever touch Google's endpoints, never logs.
+  Hand-rolled IMAP deliberately NOT built (error-prone).
+  `omni email <agent-id> [--poll 5] [--query "<gmail search>"]`;
+  `omni doctor` gains the three `GMAIL_*` rows. Docs: CHANNELS.md (Google
+  Cloud setup: enable Gmail API, OAuth consent with
+  `gmail.readonly` + `gmail.send` + `gmail.modify`, refresh token via OAuth
+  Playground; "unverified app" note; sending-limits / anti-spam ToS note).
+- Rich artifacts: kernel `artifact.save` / `artifact.list` tools — saved to
+  `<agentHome>/artifacts/<name>.html` with the same path-traversal jail as
+  `doc.write`, 512KB per-file and 10MB per-directory caps, write-class
+  (policy-gated). Wired into every agent stack (top-level, web, handoff
+  sub-agents) like `doc.*`.
+- Web console Artifacts tab: `GET /api/artifacts` (list),
+  `GET /api/artifacts/<name>` (`text/html`, jail-checked), preview in an
+  `<iframe sandbox="">` — **empty sandbox: no scripts, no same-origin, no
+  forms**. JavaScript is intentionally disabled in the viewer (static
+  inline-CSS/SVG documents only); documented in WEB.md as a deliberate
+  safety boundary, not a missing feature.
+
+### Honestly out
+- Realtime voice calls: still theater without a real telephony provider.
+- Hosted relay: still contradicts the local-first thesis.
+- Hand-rolled IMAP: the Gmail API is the honest path; an IMAP backend stays
+  a documented future option, not a half-built one.
+
+### Honest limits (carried forward)
+- No live Gmail API calls exercised on the build machine (mocked fetch
+  only); needs a real Google Cloud OAuth client on a live machine.
+- Seen message ids are in-memory — a restart may re-see recent mail
+  (documented in CHANNELS.md), same tradeoff as X's `since_id`.
+
 ## [1.3.0] — 2026-10-17
 
 **Browser tool, Slack, provider router, X search** — closes the CRITICAL gap

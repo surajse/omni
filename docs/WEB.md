@@ -18,6 +18,15 @@ omni web --port 9000      # custom port (or OMNI_WEB_PORT env)
   terminal. Approve or Deny; the run continues. The panel polls every 2 seconds.
 - **Run transcript** — paste a run id to inspect the full recorded event log
   (the same JSONL saved under `~/.omni/agents/<id>/runs/`).
+- **Docs** — browse an agent's docs workspace (`~/.omni/agents/<id>/docs/`),
+  rendered as Markdown.
+- **Artifacts** — list the agent's rich HTML artifacts
+  (`~/.omni/agents/<id>/artifacts/`, saved with the `artifact.save` tool)
+  and preview the selected one in a fully-sandboxed `<iframe sandbox="">`:
+  **no scripts, no same-origin, no forms** — artifacts are static documents
+  (inline CSS/SVG charts and reports), never apps. JavaScript is
+  intentionally disabled in the viewer; this is a deliberate safety boundary,
+  not a missing feature.
 
 ## API
 
@@ -30,6 +39,10 @@ omni web --port 9000      # custom port (or OMNI_WEB_PORT env)
 | `GET` | `/api/approvals` | Pending approvals `[{ id, runId, tool, args, createdAt }]` |
 | `POST` | `/api/approvals/:id` | `{ approved: boolean }` → resolves it, the run continues |
 | `GET` | `/api/runs/:runId` | `{ runId, agentId, done, output, events }` |
+| `GET` | `/api/docs?agentId=` | `{ files }` in the agent's docs workspace |
+| `GET` | `/api/docs/content?agentId=&path=` | One document's Markdown content |
+| `GET` | `/api/artifacts?agentId=` | `{ files }` in the agent's artifacts dir |
+| `GET` | `/api/artifacts/content?agentId=&name=` | One artifact's HTML (`text/html`; path-jailed) |
 
 ## Security
 
