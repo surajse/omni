@@ -33,9 +33,14 @@ omni web --port 9000      # custom port (or OMNI_WEB_PORT env)
 
 ## Security
 
-**The console binds `127.0.0.1` only and has no authentication.** That is
-deliberate for v0.3: it is a local operator UI, like a database admin panel.
+**The console binds `127.0.0.1` only.** That is deliberate: it is a local
+operator UI, like a database admin panel.
 
+- **Optional token (new in v0.4):** set `OMNI_WEB_TOKEN` to a long random
+  string and every request to `/` and `/api/*` must carry
+  `?token=<value>` (compared in constant time). The page's own API calls
+  append it automatically. **Set a token if you ever bind wider** than
+  localhost, or if anyone other than you can reach the machine.
 - Do NOT expose the port to the public internet (no `--host 0.0.0.0` option
   exists on purpose).
 - Anyone who can reach the port can chat as your agents and approve their

@@ -1,7 +1,11 @@
 // Omni plugin manifest schema (v1.0) and hand-rolled validator.
+//
+// v1.0 is additive: "mcp-http" source kind and the "discover" tool flag were
+// added in v0.4 without bumping manifestVersion. See docs/PLUGIN_SPEC.md.
 
 export type ToolSource =
   | { kind: 'mcp-stdio'; command: string; args?: string[]; env?: Record<string, string> }
+  | { kind: 'mcp-http'; url: string; headers?: Record<string, string> }
   | { kind: 'http'; baseUrl: string }
   | { kind: 'builtin'; ref: string };
 
@@ -10,6 +14,12 @@ export interface PluginTool {
   description: string;
   parameters: Record<string, unknown>;
   readOnly?: boolean;
+  /**
+   * When true, hosts may auto-connect this tool's source and register its
+   * capabilities (e.g. list an MCP server's tools) without per-tool config.
+   * Defaults to false.
+   */
+  discover?: boolean;
   source: ToolSource;
 }
 
@@ -54,6 +64,16 @@ function validateToolSource(source: unknown, path: string, errors: string[]): vo
     ) {
       errors.push(`${path}: mcp-stdio source "env" must be a record of strings`);
     }
+  } else if (kind === 'mcp-http') {
+    if (typeof source['url'] !== 'string' || source['url'].length === 0) {
+      errors.push(`${path}: mcp-http source requires a non-empty "url" string`);
+    }
+    if (
+      source['headers'] !== undefined &&
+      (!isRecord(source['headers']) || !Object.values(source['headers']).every((v) => typeof v === 'string'))
+    ) {
+      errors.push(`${path}: mcp-http source "headers" must be a record of strings`);
+    }
   } else if (kind === 'http') {
     if (typeof source['baseUrl'] !== 'string' || source['baseUrl'].length === 0) {
       errors.push(`${path}: http source requires a non-empty "baseUrl" string`);
@@ -63,7 +83,7 @@ function validateToolSource(source: unknown, path: string, errors: string[]): vo
       errors.push(`${path}: builtin source requires a non-empty "ref" string`);
     }
   } else {
-    errors.push(`${path}: unknown source kind ${JSON.stringify(kind)} (expected "mcp-stdio", "http", or "builtin")`);
+    errors.push(`${path}: unknown source kind ${JSON.stringify(kind)} (expected "mcp-stdio", "mcp-http", "http", or "builtin")`);
   }
 }
 
@@ -122,6 +142,9 @@ export function validateManifest(json: unknown): ValidationResult {
       }
       if (t['readOnly'] !== undefined && typeof t['readOnly'] !== 'boolean') {
         errors.push(`${path}.readOnly must be a boolean when present`);
+      }
+      if (t['discover'] !== undefined && typeof t['discover'] !== 'boolean') {
+        errors.push(`${path}.discover must be a boolean when present`);
       }
       validateToolSource(t['source'], `${path}.source`, errors);
     });

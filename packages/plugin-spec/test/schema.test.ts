@@ -93,4 +93,49 @@ describe('validateManifest', () => {
       expect(result.errors.some((e) => e.includes('manifestVersion'))).toBe(true);
     }
   });
+
+  it('accepts an mcp-http discover tool with headers', () => {
+    const result = validateManifest({
+      manifestVersion: '1.0',
+      name: 'calcom',
+      version: '1.0.0',
+      tools: [
+        {
+          name: 'calcom',
+          description: "MCP server 'calcom' (imported from Grok plugin)",
+          parameters: { type: 'object', properties: {} },
+          readOnly: false,
+          discover: true,
+          source: { kind: 'mcp-http', url: 'https://mcp.cal.com/mcp', headers: { 'X-Test': '1' } },
+        },
+      ],
+      permissions: ['network'],
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.manifest.tools[0]!.discover).toBe(true);
+    }
+  });
+
+  it('rejects an mcp-http source without a url and a non-boolean discover', () => {
+    const result = validateManifest({
+      manifestVersion: '1.0',
+      name: 'demo',
+      version: '1.0.0',
+      tools: [
+        {
+          name: 't',
+          description: 'd',
+          parameters: {},
+          discover: 'yes',
+          source: { kind: 'mcp-http', headers: { a: 1 } },
+        },
+      ],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.some((e) => e.includes('"url"'))).toBe(true);
+      expect(result.errors.some((e) => e.includes('discover'))).toBe(true);
+    }
+  });
 });

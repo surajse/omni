@@ -30,7 +30,7 @@ afterEach(async () => {
   }
 });
 
-async function startTestServer(script: Script): Promise<Ctx> {
+async function startTestServer(script: Script, extra?: { token?: string }): Promise<Ctx> {
   const dir = mkdtempSync(join(tmpdir(), 'omni-web-test-'));
   const registry = new AgentRegistry(dir);
   const config: AgentConfig = {
@@ -66,6 +66,7 @@ async function startTestServer(script: Script): Promise<Ctx> {
       });
     },
     port: 0,
+    token: extra?.token,
   });
   const port = await server.start();
   servers.push(server);
@@ -264,5 +265,19 @@ describe('web console', () => {
     expect((await api(port, 'GET', '/api/events?runId=nope')).status).toBe(404);
     expect((await api(port, 'GET', '/api/runs/nope')).status).toBe(404);
     expect((await api(port, 'POST', '/api/approvals/nope', { approved: true })).status).toBe(404);
+  });
+
+  it('enforces OMNI_WEB_TOKEN when configured, open otherwise', async () => {
+    const { port } = await startTestServer([], { token: 's3cr3t' });
+    expect((await api(port, 'GET', '/api/agents')).status).toBe(401);
+    expect((await api(port, 'GET', '/api/agents?token=wrong')).status).toBe(401);
+    expect((await getText(port, '/')).status).toBe(401);
+    const ok = await api(port, 'GET', '/api/agents?token=s3cr3t');
+    expect(ok.status).toBe(200);
+    expect((ok.json as unknown[])).toHaveLength(1);
+
+    // Without a token configured, everything stays open.
+    const open = await startTestServer([]);
+    expect((await api(open.port, 'GET', '/api/agents')).status).toBe(200);
   });
 });

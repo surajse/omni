@@ -1,6 +1,7 @@
 // Run transcripts: collect RunEvents during a run and persist them as JSONL.
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { scrubSecrets } from './secrets.js';
 import type { RunEvent } from './types.js';
 
 export interface TranscriptEntry {
@@ -44,13 +45,13 @@ export class RunRecorder {
     return this.entries.map((e) => JSON.stringify(e)).join('\n') + (this.entries.length > 0 ? '\n' : '');
   }
 
-  /** Persist under `<dir>/runs/<runId>.jsonl`; returns the file path. */
+  /** Persist under `<dir>/runs/<runId>.jsonl`; returns the file path. Secrets in tool args/outputs are scrubbed before writing. */
   save(dir: string, runId: string): string {
     const runsDir = join(dir, 'runs');
     mkdirSync(runsDir, { recursive: true });
     const safeId = runId.replace(/[^a-zA-Z0-9-_]/g, '_');
     const path = join(runsDir, `${safeId}.jsonl`);
-    writeFileSync(path, this.toJSONL());
+    writeFileSync(path, scrubSecrets(this.toJSONL()));
     return path;
   }
 

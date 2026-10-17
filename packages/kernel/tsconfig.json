@@ -1,1 +1,16 @@
-{"compilerOptions":{"outDir":"dist","tsBuildInfoFile":"dist/.tsbuildinfo"},"extends":"../../tsconfig.base.json","include":["src","test"]}
+{
+  "compilerOptions": {
+    "outDir": "dist",
+    "tsBuildInfoFile": "dist/.tsbuildinfo"
+  },
+  "extends": "../../tsconfig.base.json",
+  "include": [
+    "src",
+    "test"
+  ],
+  "references": [
+    {
+      "path": "../plugin-spec"
+    }
+  ]
+}

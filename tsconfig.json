@@ -1,1 +1,48 @@
-{"extends":"./tsconfig.base.json","files":[],"references":[{"path":"packages/kernel"},{"path":"packages/memory"},{"path":"packages/plugin-spec"},{"path":"packages/channels"},{"path":"packages/sandbox"},{"path":"packages/channels-telegram"},{"path":"packages/channels-whatsapp"},{"path":"packages/scheduler"},{"path":"packages/skills"},{"path":"apps/cli"},{"path":"apps/web"}]}
+{
+  "extends": "./tsconfig.base.json",
+  "files": [],
+  "references": [
+    {
+      "path": "packages/kernel"
+    },
+    {
+      "path": "packages/memory"
+    },
+    {
+      "path": "packages/plugin-spec"
+    },
+    {
+      "path": "packages/channels"
+    },
+    {
+      "path": "packages/sandbox"
+    },
+    {
+      "path": "packages/channels-telegram"
+    },
+    {
+      "path": "packages/channels-whatsapp"
+    },
+    {
+      "path": "packages/scheduler"
+    },
+    {
+      "path": "packages/skills"
+    },
+    {
+      "path": "apps/cli"
+    },
+    {
+      "path": "apps/web"
+    },
+    {
+      "path": "packages/importers"
+    },
+    {
+      "path": "packages/registry"
+    },
+    {
+      "path": "packages/teams"
+    }
+  ]
+}

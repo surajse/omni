@@ -7,3 +7,5 @@ export * from './agent.js';
 export * from './registry.js';
 export * from './transcript.js';
 export * from './handoff.js';
+export * from './secrets.js';
+export * from './pack.js';

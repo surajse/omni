@@ -2,7 +2,8 @@
 // Omni CLI: init / list / chat / run / plugin validate.
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
-import { mkdirSync, readFileSync, readdirSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { randomUUID } from 'node:crypto';
@@ -11,10 +12,12 @@ import {
   AgentRegistry,
   MockProvider,
   OpenAICompatibleProvider,
+  packAgent,
   PolicyEngine,
   RunRecorder,
   ToolGateway,
   registerHandoffTool,
+  unpackAgent,
 } from '@omni/kernel';
 import type { AgentConfig, ApprovalHandler, ModelProvider, RunEvent } from '@omni/kernel';
 import { SkillManager, learnSkillFromTranscript } from '@omni/skills';
@@ -28,6 +31,8 @@ import { TelegramChannel } from '@omni/channels-telegram';
 import { WhatsAppCloudChannel } from '@omni/channels-whatsapp';
 import { RoutineStore, Scheduler, validateCron } from '@omni/scheduler';
 import type { Routine } from '@omni/scheduler';
+import { RegistryManager } from '@omni/registry';
+import { TeamManager } from '@omni/teams';
 
 export function slugify(name: string): string {
   return (
@@ -270,6 +275,34 @@ export function parseIdList(csv: string | undefined): number[] | undefined {
   return ids.length > 0 ? ids : undefined;
 }
 
+/** Parse `--out <file>`; undefined when absent (pure — tested). */
+export function parseOutFile(rest: string[]): string | undefined {
+  const i = rest.indexOf('--out');
+  if (i < 0) return undefined;
+  const file = rest[i + 1];
+  if (!file) throw new Error('--out requires a file path');
+  return file;
+}
+
+/** Parse `--as <id>`; undefined when absent (pure — tested). */
+export function parseAsId(rest: string[]): string | undefined {
+  const i = rest.indexOf('--as');
+  if (i < 0) return undefined;
+  const id = rest[i + 1];
+  if (!id) throw new Error('--as requires an id');
+  if (!/^[a-z0-9-]+$/.test(id)) throw new Error(`--as id "${id}" must match ^[a-z0-9-]+$`);
+  return id;
+}
+
+/** Parse `--team <name>`; throws when absent/invalid (pure — tested). */
+export function parseTeamFlag(rest: string[]): string {
+  const i = rest.indexOf('--team');
+  const name = i >= 0 ? rest[i + 1] : undefined;
+  if (!name) throw new Error('requires --team <name>');
+  if (!/^[a-z0-9-]+$/.test(name)) throw new Error(`--team name "${name}" must match ^[a-z0-9-]+$`);
+  return name;
+}
+
 function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -285,7 +318,7 @@ async function askApproval(question: string): Promise<boolean> {
 }
 
 function usage(): string {
-  return `omni — universal agent platform (v0.3)
+  return `omni — universal agent platform (v0.4)
 
 Usage:
   omni init --name <Name>                 Create a new agent (stored in ~/.omni/agents)
@@ -294,7 +327,22 @@ Usage:
   omni run <id> "<task>"                  Run a single task and print the result
   omni learn <id> <skill> "<description>" Learn a skill from the agent's last run
   omni web [--port N]                     Web console with live events + approval queue
+  omni doctor                             Environment diagnostics (names of env vars only)
   omni plugin validate <file>             Validate an .omni-plugin.json manifest
+  omni plugin search <query>              Search registry sources for plugins
+  omni plugin install <name>              Install a plugin (~/.omni/plugins)
+  omni plugin list                        List installed plugins
+  omni plugin uninstall <name>            Remove an installed plugin
+  omni plugin source add <n> <loc>        Add a registry source (dir or git URL)
+  omni plugin source list                 List registry sources
+  omni plugin source remove <n>           Remove a registry source
+  omni agent export <id> [--out <file>]   Export an agent as an .omnipack.json pack
+  omni agent import <file> [--as <id>]    Import an agent pack
+  omni team init <name>                   Create a team (shared directory)
+  omni team publish <id> --team <t>       Publish an agent pack to a team
+  omni team install <t> <id> [--as <n>]   Install a team agent
+  omni team list                          List teams
+  omni team agents <t>                    List a team's published agents
   omni routine add <id> "<cron>" "<task>" Add a scheduled routine (5-field cron)
   omni routine list [id]                  List routines
   omni routine remove <routine-id>         Remove a routine
@@ -309,6 +357,8 @@ Environment:
   OMNI_MODEL              Model name (default: gpt-4o-mini)
   OMNI_SANDBOX_IMAGE      Docker image for agent sandboxes (default: ubuntu:24.04)
   OMNI_WEB_PORT           Web console port (default: 8080; --port overrides)
+  OMNI_WEB_TOKEN          Optional token guarding the web console (?token= required)
+  OMNI_TEAMS_ROOT         Teams directory (default: ~/.omni/teams; point at a shared folder)
   TELEGRAM_BOT_TOKEN      Telegram bot token from @BotFather
   TELEGRAM_ALLOWED_USERS  Comma-separated Telegram user ids allowed to chat (default: all)
   WHATSAPP_TOKEN          WhatsApp Cloud API access token
@@ -320,7 +370,9 @@ Notes:
   - In "routine run" daemon mode there is no human to approve: write-class
     tools are auto-SKIPPED and each skip is logged. Prefer read-only routines.
   - Sandbox commands need Docker; without it the CLI warns and continues
-    without computer tools.`;
+    without computer tools.
+  - Packs (.omnipack.json) scrub secrets from memory at export time; agent
+    folders copy cleanly between machines.`;
 }
 
 function cmdInit(name: string | undefined): void {
@@ -722,10 +774,15 @@ async function cmdWeb(portOpt: number | undefined): Promise<void> {
     },
     host: '127.0.0.1',
     port,
+    token: process.env['OMNI_WEB_TOKEN'] || undefined,
   });
   const actualPort = await server.start();
   console.log(`Omni web console: http://127.0.0.1:${actualPort}`);
-  console.log('Local-only, no auth: do not expose this port to the public internet.');
+  if (process.env['OMNI_WEB_TOKEN']) {
+    console.log('Token auth enabled (OMNI_WEB_TOKEN): open the URL with ?token=<value>.');
+  } else {
+    console.log('Local-only, no auth: do not expose this port to the public internet.');
+  }
   const shutdown = (): void => {
     void server.stop().finally(() => {
       memory.close();
@@ -758,6 +815,315 @@ async function cmdSandboxExec(agentId: string, command: string): Promise<void> {
   }
   console.error(`exit code: ${res.exitCode}`);
   if (res.exitCode !== 0) process.exit(res.exitCode);
+}
+
+// ---------- plugin registry commands ----------
+
+function cmdPluginSearch(query: string | undefined): void {
+  if (!query) {
+    console.error('usage: omni plugin search <query>');
+    process.exit(1);
+  }
+  const mgr = new RegistryManager(omniHome());
+  let hits;
+  try {
+    hits = mgr.search(query);
+  } catch (err) {
+    console.error(`Error: ${errText(err)}`);
+    process.exit(1);
+  }
+  if (hits.length === 0) {
+    console.log(`No plugins found for "${query}".`);
+    return;
+  }
+  for (const h of hits) {
+    console.log(`${h.name}\t${h.version}\t[${h.sourceName}]${h.description ? ` — ${h.description}` : ''}`);
+  }
+}
+
+function cmdPluginInstall(name: string | undefined): void {
+  if (!name) {
+    console.error('usage: omni plugin install <name>');
+    process.exit(1);
+  }
+  const mgr = new RegistryManager(omniHome());
+  try {
+    const res = mgr.install(name);
+    console.log(`Installed ${res.name}@${res.version} → ${res.installedPath}`);
+    if (res.convertedFromGrok) {
+      console.log('Note: converted from .grok-plugin format (manifest + skills written).');
+    }
+  } catch (err) {
+    console.error(`Error: ${errText(err)}`);
+    process.exit(1);
+  }
+}
+
+function cmdPluginList(): void {
+  const installed = new RegistryManager(omniHome()).listInstalled();
+  if (installed.length === 0) {
+    console.log('No plugins installed. Search with: omni plugin search <query>');
+    return;
+  }
+  for (const n of installed) console.log(n);
+}
+
+function cmdPluginUninstall(name: string | undefined): void {
+  if (!name) {
+    console.error('usage: omni plugin uninstall <name>');
+    process.exit(1);
+  }
+  try {
+    new RegistryManager(omniHome()).removeInstalled(name);
+    console.log(`Uninstalled plugin "${name}".`);
+  } catch (err) {
+    console.error(`Error: ${errText(err)}`);
+    process.exit(1);
+  }
+}
+
+function cmdPluginSourceAdd(name: string | undefined, location: string | undefined): void {
+  if (!name || !location) {
+    console.error('usage: omni plugin source add <name> <dir-or-git-url>');
+    process.exit(1);
+  }
+  try {
+    const rec = new RegistryManager(omniHome()).addSource(name, location);
+    console.log(`Added ${rec.kind} registry source "${name}" (${rec.location}).`);
+  } catch (err) {
+    console.error(`Error: ${errText(err)}`);
+    process.exit(1);
+  }
+}
+
+function cmdPluginSourceList(): void {
+  const sources = new RegistryManager(omniHome()).listSources();
+  if (sources.length === 0) {
+    console.log('No registry sources. Add one with: omni plugin source add <name> <dir-or-git-url>');
+    return;
+  }
+  for (const s of sources) console.log(`${s.name}\t${s.kind}\t${s.location}`);
+}
+
+function cmdPluginSourceRemove(name: string | undefined): void {
+  if (!name) {
+    console.error('usage: omni plugin source remove <name>');
+    process.exit(1);
+  }
+  try {
+    new RegistryManager(omniHome()).removeSource(name);
+    console.log(`Removed registry source "${name}".`);
+  } catch (err) {
+    console.error(`Error: ${errText(err)}`);
+    process.exit(1);
+  }
+}
+
+// ---------- agent pack commands ----------
+
+function cmdAgentExport(id: string | undefined, rest: string[]): void {
+  if (!id) {
+    console.error('usage: omni agent export <id> [--out <file>]');
+    process.exit(1);
+  }
+  let outFile: string | undefined;
+  try {
+    outFile = parseOutFile(rest);
+  } catch (err) {
+    console.error(`Error: ${errText(err)}`);
+    process.exit(1);
+  }
+  const home = omniHome();
+  const { memory } = buildGateway(home);
+  try {
+    const pack = packAgent(home, id, memory);
+    const dest = outFile ?? `${id}.omnipack.json`;
+    writeFileSync(dest, JSON.stringify(pack, null, 2) + '\n', 'utf8');
+    console.log(
+      `Exported agent "${id}" → ${dest} ` +
+        `(${pack.skills.length} skill(s), ${pack.routines.length} routine(s), memory scrubbed).`,
+    );
+  } catch (err) {
+    console.error(`Error: ${errText(err)}`);
+    process.exit(1);
+  } finally {
+    memory.close();
+  }
+}
+
+function cmdAgentImport(file: string | undefined, rest: string[]): void {
+  if (!file) {
+    console.error('usage: omni agent import <file> [--as <new-id>]');
+    process.exit(1);
+  }
+  let asId: string | undefined;
+  try {
+    asId = parseAsId(rest);
+  } catch (err) {
+    console.error(`Error: ${errText(err)}`);
+    process.exit(1);
+  }
+  let pack: unknown;
+  try {
+    pack = JSON.parse(readFileSync(file, 'utf8'));
+  } catch {
+    console.error(`Cannot read/parse pack file: ${file}`);
+    process.exit(1);
+  }
+  const home = omniHome();
+  const { memory } = buildGateway(home);
+  try {
+    const config = unpackAgent(home, pack, memory, asId);
+    console.log(`Imported agent "${config.id}"${asId ? ` (renamed on import)` : ''}.`);
+  } catch (err) {
+    console.error(`Error: ${errText(err)}`);
+    process.exit(1);
+  } finally {
+    memory.close();
+  }
+}
+
+// ---------- team commands ----------
+
+function teamsRoot(home: string): string {
+  return process.env['OMNI_TEAMS_ROOT'] ?? join(home, 'teams');
+}
+
+function cmdTeamInit(name: string | undefined): void {
+  if (!name) {
+    console.error('usage: omni team init <name>');
+    process.exit(1);
+  }
+  try {
+    new TeamManager(teamsRoot(omniHome())).init(name);
+    console.log(`Created team "${name}". Point OMNI_TEAMS_ROOT at a shared folder to collaborate.`);
+  } catch (err) {
+    console.error(`Error: ${errText(err)}`);
+    process.exit(1);
+  }
+}
+
+function cmdTeamPublish(agentId: string | undefined, rest: string[]): void {
+  if (!agentId) {
+    console.error('usage: omni team publish <agent-id> --team <name>');
+    process.exit(1);
+  }
+  let team: string;
+  try {
+    team = parseTeamFlag(rest);
+  } catch (err) {
+    console.error(`Error: ${errText(err)}`);
+    process.exit(1);
+  }
+  const home = omniHome();
+  const { memory } = buildGateway(home);
+  try {
+    new TeamManager(teamsRoot(home)).publish(home, agentId, team, memory);
+    console.log(`Published agent "${agentId}" to team "${team}".`);
+  } catch (err) {
+    console.error(`Error: ${errText(err)}`);
+    process.exit(1);
+  } finally {
+    memory.close();
+  }
+}
+
+function cmdTeamInstall(team: string | undefined, agentId: string | undefined, rest: string[]): void {
+  if (!team || !agentId) {
+    console.error('usage: omni team install <team> <agent-id> [--as <new-id>]');
+    process.exit(1);
+  }
+  let asId: string | undefined;
+  try {
+    asId = parseAsId(rest);
+  } catch (err) {
+    console.error(`Error: ${errText(err)}`);
+    process.exit(1);
+  }
+  const home = omniHome();
+  const { memory } = buildGateway(home);
+  try {
+    const config = new TeamManager(teamsRoot(home)).install(home, team, agentId, memory, asId);
+    console.log(`Installed team agent "${agentId}" as "${config.id}".`);
+  } catch (err) {
+    console.error(`Error: ${errText(err)}`);
+    process.exit(1);
+  } finally {
+    memory.close();
+  }
+}
+
+function cmdTeamList(): void {
+  const teams = new TeamManager(teamsRoot(omniHome())).list();
+  if (teams.length === 0) {
+    console.log('No teams yet. Create one with: omni team init <name>');
+    return;
+  }
+  for (const t of teams) console.log(t);
+}
+
+function cmdTeamAgents(team: string | undefined): void {
+  if (!team) {
+    console.error('usage: omni team agents <team>');
+    process.exit(1);
+  }
+  try {
+    const agents = new TeamManager(teamsRoot(omniHome())).listAgents(team);
+    if (agents.length === 0) console.log(`Team "${team}" has no published agents yet.`);
+    for (const a of agents) console.log(a);
+  } catch (err) {
+    console.error(`Error: ${errText(err)}`);
+    process.exit(1);
+  }
+}
+
+// ---------- doctor ----------
+
+function checkCommand(cmd: string, args: string[]): boolean {
+  try {
+    execFileSync(cmd, args, { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Diagnostics; always exits 0. Prints names of env vars only, never values. */
+function cmdDoctor(): void {
+  const home = omniHome();
+  const rows: Array<[string, boolean, string]> = [];
+  const nodeMajor = Number(process.versions.node.split('.')[0] ?? '0');
+  rows.push(['node', nodeMajor >= 22, `v${process.versions.node} (needs >= 22)`]);
+  rows.push(['pnpm', checkCommand('pnpm', ['--version']), checkCommand('pnpm', ['--version']) ? 'present' : 'not found on PATH']);
+  let homeOk = false;
+  try {
+    mkdirSync(home, { recursive: true });
+    const probe = join(home, '.doctor-probe');
+    writeFileSync(probe, 'ok');
+    rmSync(probe);
+    homeOk = true;
+  } catch {
+    homeOk = false;
+  }
+  rows.push(['~/.omni writable', homeOk, homeOk ? home : 'cannot write']);
+  const dockerOk = checkCommand('docker', ['--version']);
+  rows.push(['docker', dockerOk, dockerOk ? 'present (sandbox available)' : 'not found — sandbox commands need it']);
+  const gitOk = checkCommand('git', ['--version']);
+  rows.push(['git', gitOk, gitOk ? 'present (git registry sources available)' : 'not found — git registry sources need it']);
+  for (const v of ['TELEGRAM_BOT_TOKEN', 'WHATSAPP_TOKEN', 'OMNI_API_KEY', 'OMNI_WEB_TOKEN']) {
+    const set = !!process.env[v];
+    rows.push([v, set, set ? 'set' : 'not set']);
+  }
+  let sources = 0;
+  try {
+    sources = new RegistryManager(home).listSources().length;
+  } catch {
+    sources = 0;
+  }
+  rows.push(['registry sources', true, sources === 0 ? 'none configured' : `${sources} configured`]);
+  for (const [name, ok, detail] of rows) {
+    console.log(`${ok ? 'ok  ' : 'warn'} ${name}: ${detail}`);
+  }
 }
 
 export async function main(argv: string[]): Promise<void> {
@@ -804,12 +1170,53 @@ export async function main(argv: string[]): Promise<void> {
       await cmdWeb(port);
       break;
     }
-    case 'plugin':
-      if (rest[0] === 'validate') cmdPluginValidate(rest[1]);
-      else {
-        console.error('unknown plugin subcommand (try: plugin validate <file>)');
+    case 'plugin': {
+      const [sub, ...args] = rest;
+      if (sub === 'validate') cmdPluginValidate(args[0]);
+      else if (sub === 'search') cmdPluginSearch(args[0]);
+      else if (sub === 'install') cmdPluginInstall(args[0]);
+      else if (sub === 'list') cmdPluginList();
+      else if (sub === 'uninstall') cmdPluginUninstall(args[0]);
+      else if (sub === 'source') {
+        const [sop, ...sargs] = args;
+        if (sop === 'add') cmdPluginSourceAdd(sargs[0], sargs[1]);
+        else if (sop === 'list') cmdPluginSourceList();
+        else if (sop === 'remove') cmdPluginSourceRemove(sargs[0]);
+        else {
+          console.error('unknown plugin source subcommand (try: add | list | remove)');
+          process.exit(1);
+        }
+      } else {
+        console.error('unknown plugin subcommand (try: validate | search | install | list | uninstall | source)');
         process.exit(1);
       }
+      break;
+    }
+    case 'agent': {
+      const [sub, ...args] = rest;
+      if (sub === 'export') cmdAgentExport(args[0], args.slice(1));
+      else if (sub === 'import') cmdAgentImport(args[0], args.slice(1));
+      else {
+        console.error('unknown agent subcommand (try: export | import)');
+        process.exit(1);
+      }
+      break;
+    }
+    case 'team': {
+      const [sub, ...args] = rest;
+      if (sub === 'init') cmdTeamInit(args[0]);
+      else if (sub === 'publish') cmdTeamPublish(args[0], args.slice(1));
+      else if (sub === 'install') cmdTeamInstall(args[0], args[1], args.slice(2));
+      else if (sub === 'list') cmdTeamList();
+      else if (sub === 'agents') cmdTeamAgents(args[0]);
+      else {
+        console.error('unknown team subcommand (try: init | publish | install | list | agents)');
+        process.exit(1);
+      }
+      break;
+    }
+    case 'doctor':
+      cmdDoctor();
       break;
     case 'routine': {
       const [sub, ...args] = rest;

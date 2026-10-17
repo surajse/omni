@@ -1,5 +1,6 @@
 // Namespaced key/value memory backed by node:sqlite (DatabaseSync).
 import { DatabaseSync } from 'node:sqlite';
+import { isSecretKey, scrubSecrets } from '@omni/kernel';
 
 export interface MemoryEntry {
   key: string;
@@ -72,6 +73,7 @@ export class SqliteMemoryStore implements MemoryStore {
     this.db.prepare('DELETE FROM memories WHERE namespace = ? AND key = ?').run(namespace, key);
   }
 
+  /** Export entries as JSON. Credential-looking values are scrubbed — an export is safe to share. */
   exportJson(namespace?: string): string {
     const rows =
       namespace === undefined
@@ -79,7 +81,14 @@ export class SqliteMemoryStore implements MemoryStore {
         : (this.db
             .prepare('SELECT namespace, key, value, updated_at FROM memories WHERE namespace = ? ORDER BY key')
             .all(namespace) as unknown as Row[]);
-    return JSON.stringify(rows.map(toEntry).map((e, i) => ({ ...e, namespace: rows[i].namespace })), null, 2);
+    const entries = rows.map(toEntry).map((e, i) => ({
+      ...e,
+      namespace: rows[i].namespace,
+      // The secret lives in the value field here ({"key":"api_key","value":"..."}),
+      // so redact by key name before serializing; scrubSecrets is defense in depth.
+      value: isSecretKey(e.key) ? '[REDACTED]' : e.value,
+    }));
+    return scrubSecrets(JSON.stringify(entries, null, 2));
   }
 
   importJson(json: string): void {

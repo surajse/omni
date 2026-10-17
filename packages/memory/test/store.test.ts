@@ -58,4 +58,20 @@ describe('SqliteMemoryStore', () => {
       store.close();
     }
   });
+
+  it('exportJson scrubs credential-looking values', () => {
+    const store = new SqliteMemoryStore(':memory:');
+    try {
+      store.remember('ns1', 'api_key', 'sk-live-abc123');
+      store.remember('ns1', 'color', 'blue');
+      const json = store.exportJson('ns1');
+      expect(json).not.toContain('sk-live-abc123');
+      expect(json).toContain('[REDACTED]');
+      expect(json).toContain('"color"');
+      // The live value is untouched in the store itself.
+      expect(store.recall('ns1', 'api_key')[0]!.value).toBe('sk-live-abc123');
+    } finally {
+      store.close();
+    }
+  });
 });

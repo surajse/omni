@@ -31,16 +31,24 @@ read-only builtin tool plus one MCP-stdio tool.
 | `description` | yes | Non-empty |
 | `parameters` | yes | JSON Schema object for arguments |
 | `readOnly` | no | Boolean; feeds the policy default (allow vs ask) |
+| `discover` | no | Boolean (default `false`); when `true`, the host should list the remote server's tools at attach time and expose them |
 | `source` | yes | One of the source kinds below |
 
 ### Source kinds
 
 - **`mcp-stdio`**: `{ kind, command, args?, env? }` — spawn a command and
   speak MCP over stdio. `command` is required and non-empty.
+- **`mcp-http`** (new in v0.4): `{ kind, url, headers? }` — connect to a
+  remote MCP server over Streamable HTTP. `url` is required and non-empty.
+  Used by the `.grok-plugin` importer for `{ "type": "http" }` servers.
 - **`http`**: `{ kind, baseUrl }` — a remote tool endpoint. `baseUrl`
   is required and non-empty.
 - **`builtin`**: `{ kind, ref }` — a tool implemented by the host (the CLI
   resolves `ref` to a registered gateway tool). `ref` is required.
+
+> **Additive change:** `mcp-http` and `discover` were added without bumping
+> `manifestVersion` — it stays `"1.0"`. Old validators reject the new kind;
+> new validators accept old manifests unchanged.
 
 ## Validation rules (summary)
 

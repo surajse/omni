@@ -38,17 +38,37 @@
   binds 127.0.0.1 only, no auth by design (see docs/WEB.md)
 - Docs: SKILLS.md, WEB.md
 
-## v0.4 — Trust hardening + distribution
+## v0.4 — Distribution: share everything, import from anywhere (shipped)
 
-- Sandbox hardening: per-agent egress network policy, image digest pinning by default
-- Approvals over the channel (approve/deny buttons in Telegram/WhatsApp, not just console/web)
-- Plugin loader in the CLI (install from manifest, `mcp-stdio` supervision)
-- Memory: semantic recall (sqlite-vec, still local), per-agent export/import commands
-- `.omni-plugin` registry (git-based index)
-- `.grok-plugin` importer (install rivals' plugins into Omni agents)
-- OpenDots dot importer
-- Usage/cost tracking per agent and per tool
-- Signed plugin manifests (provenance)
+- `@omni/registry`: plugin registry — `index.json` format (version 1),
+  local-dir and git-URL sources (`git clone --depth 1`),
+  `search` / `install` / `list` / `remove`; bundled `registries/examples/`
+  (`hello` + `echo` plugins)
+- `@omni/importers`: real `.grok-plugin` importer (verified against
+  xai-org/plugin-marketplace 2026-10-17) — `.grok-plugin/plugin.json` +
+  `.mcp.json` + `skills/*/SKILL.md` → `omni.plugin.json` (per-server
+  `discover: true` tools); auto-runs on `plugin install` for grok-format dirs
+- `@omni/plugin-spec`: `mcp-http` source kind (`{url, headers?}`) + tool
+  `discover?: boolean` (additive; manifestVersion stays `"1.0"`)
+- Kernel: `McpHttpToolSource` (StreamableHTTPClientTransport) +
+  `attachPluginManifest()`; `packAgent`/`unpackAgent` (agent packs:
+  config + skills + routines + memory, secrets scrubbed at export)
+- `@omni/teams`: filesystem team sharing — `init`/`publish`/`install`/
+  `list`/`agents`, teams root defaults to `~/.omni/teams` (`OMNI_TEAMS_ROOT`
+  override; point it at a shared git repo / synced folder)
+- Hardening: `scrubSecrets()` (JSON / env / Bearer) applied in transcript
+  save and memory `exportJson`; `omni doctor` diagnostics (always exit 0);
+  `OMNI_WEB_TOKEN` for the web console (localhost-only by default)
+- CLI: `plugin` / `agent export|import` / `team` / `doctor` commands
+
+## v1.0 — The universal agent
+
+- Sandbox escape review (per-agent egress policy, image digest pinning)
+- Installers (one-command install per OS)
+- Hosted relay (share agents without self-hosting)
+- Vector memory (sqlite-vec, still local)
+- Approvals over chat channels (Telegram/WhatsApp buttons)
+- OpenDots dot importer; usage/cost tracking; signed plugin manifests
 
 ## v1.0 — The universal agent
 

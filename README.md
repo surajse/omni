@@ -46,6 +46,8 @@ Once built, the CLI is also available as `pnpm exec omni …`.
 | `WHATSAPP_VERIFY_TOKEN` | Webhook verify token (your choice)             |
 | `WHATSAPP_PORT` | Webhook listen port (default `3000`)                 |
 | `OMNI_WEB_PORT` | Web console port (default `8080`; `omni web --port` overrides) |
+| `OMNI_WEB_TOKEN` | Optional web console token — when set, every `/` and `/api/*` request needs `?token=` (set one if you bind wider than localhost) |
+| `OMNI_TEAMS_ROOT` | Teams root dir (default `~/.omni/teams`); point at a shared git repo / synced folder |
 
 Without `OMNI_API_KEY` the CLI uses a scripted mock provider (useful for
 demos and tests). Copy `.env.example` to `.env` for local use — never commit
@@ -87,6 +89,34 @@ omni web                  # http://127.0.0.1:8080 (local-only, no auth)
 Every `omni run` now saves its transcript to `~/.omni/agents/<id>/runs/`
 (the input to `omni learn`). See [docs/SKILLS.md](docs/SKILLS.md) and
 [docs/WEB.md](docs/WEB.md).
+
+## v0.4: plugin registry, grok importer, agent packs, teams
+
+```sh
+# Find and install plugins — Omni-native or .grok-plugin (auto-converted)
+omni plugin source add examples ./registries/examples
+omni plugin search calcom
+omni plugin install calcom
+
+# Export a whole agent (config + skills + routines + memory) and share it
+omni agent export friday --out friday.omnipack.json
+omni agent import friday.omnipack.json --as friday-2
+
+# Teams: publish packs to a shared folder (git repo / synced dir via OMNI_TEAMS_ROOT)
+omni team init research-crew
+omni team publish friday --team research-crew
+omni team install research-crew friday --as friday-2
+
+# Diagnostics — always exits 0
+omni doctor
+```
+
+Secrets are scrubbed before transcripts are saved and before memory is
+exported (`[REDACTED]`); `omni doctor` only prints env var *names*, never
+values. The web console takes an optional `OMNI_WEB_TOKEN` (`?token=` on
+every request) — set one if you ever bind wider than localhost.
+See [docs/REGISTRY.md](docs/REGISTRY.md), [docs/TEAMS.md](docs/TEAMS.md),
+[docs/PLUGIN_SPEC.md](docs/PLUGIN_SPEC.md).
 
 ## Repository layout
 

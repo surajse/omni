@@ -19,6 +19,9 @@ export default defineConfig({
       '@omni/scheduler': src('scheduler'),
       '@omni/skills': src('skills'),
       '@omni/web': appSrc('web'),
+      '@omni/teams': src('teams'),
+      '@omni/registry': src('registry'),
+      '@omni/importers': src('importers'),
     },
   },
   test: {

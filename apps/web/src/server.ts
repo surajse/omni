@@ -3,7 +3,7 @@
 // One page, four jobs: pick an agent, chat with live event streaming, watch the
 // run transcript, and approve/deny pending tool approvals from the browser.
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import {
   RunRecorder,
   type Agent,
@@ -27,6 +27,12 @@ export interface WebServerOptions {
   /** Bind host. Defaults to 127.0.0.1 — never expose without auth (see docs/WEB.md). */
   host?: string;
   port?: number;
+  /**
+   * Optional bearer token. When set, `/` and every `/api/*` route require
+   * `?token=<value>` (constant-time comparison). Set OMNI_WEB_TOKEN if you
+   * ever bind wider than localhost.
+   */
+  token?: string;
 }
 
 interface PendingApproval {
@@ -55,9 +61,20 @@ export interface WebServer {
 const APPROVAL_RE = /^\/api\/approvals\/([A-Za-z0-9-]+)$/;
 const RUN_RE = /^\/api\/runs\/([A-Za-z0-9-]+)$/;
 
+/** True when no token is configured, or the request carries the right ?token=. */
+function makeAuthorizer(token: string | undefined): (url: URL) => boolean {
+  if (!token) return () => true;
+  const expected = Buffer.from(token);
+  return (url: URL) => {
+    const given = Buffer.from(url.searchParams.get('token') ?? '');
+    return given.length === expected.length && timingSafeEqual(given, expected);
+  };
+}
+
 export function createWebServer(opts: WebServerOptions): WebServer {
   const host = opts.host ?? '127.0.0.1';
   const port = opts.port ?? 8080;
+  const authorized = makeAuthorizer(opts.token);
   const runs = new Map<string, RunState>();
   const approvals = new Map<string, PendingApproval>();
   let server: Server | null = null;
@@ -175,6 +192,10 @@ export function createWebServer(opts: WebServerOptions): WebServer {
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://localhost');
+    if (!authorized(url)) {
+      json(res, 401, { error: 'unauthorized: valid ?token= required' });
+      return;
+    }
     const path = url.pathname;
     const method = req.method ?? 'GET';
 
@@ -345,6 +366,12 @@ input[type=text] { width: 60%; padding: .3rem; }
 <pre id="transcriptPre"></pre>
 
 <script>
+// Token passthrough: the server may require ?token= on every route.
+// Read it from the page URL once and append it to all API calls.
+var TOKEN = new URLSearchParams(location.search).get('token') || '';
+function api(path) {
+  return path + (path.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(TOKEN);
+}
 function addLog(who, text) {
   var log = document.getElementById('chatLog');
   var div = document.createElement('div');
@@ -358,7 +385,7 @@ function logEvent(t) {
   pre.scrollTop = pre.scrollHeight;
 }
 function refreshAgents() {
-  fetch('/api/agents').then(function (r) { return r.json(); }).then(function (agents) {
+  fetch(api('/api/agents')).then(function (r) { return r.json(); }).then(function (agents) {
     var sel = document.getElementById('agentSelect');
     sel.innerHTML = '';
     agents.forEach(function (a) {
@@ -374,7 +401,7 @@ function watchRun(runId) {
   if (es) es.close();
   document.getElementById('eventsLog').textContent = '';
   document.getElementById('runIdInput').value = runId;
-  es = new EventSource('/api/events?runId=' + encodeURIComponent(runId));
+  es = new EventSource(api('/api/events?runId=' + encodeURIComponent(runId)));
   es.addEventListener('tool-call', function (e) {
     var d = JSON.parse(e.data);
     logEvent('tool-call: ' + d.call.name + ' ' + JSON.stringify(d.call.arguments));
@@ -403,7 +430,7 @@ function sendChat() {
   if (!msg || !agentId) return;
   input.value = '';
   addLog('you', msg);
-  fetch('/api/chat', {
+  fetch(api('/api/chat'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ agentId: agentId, message: msg })
@@ -414,14 +441,14 @@ function sendChat() {
     });
 }
 function decide(id, approved) {
-  fetch('/api/approvals/' + encodeURIComponent(id), {
+  fetch(api('/api/approvals/' + encodeURIComponent(id)), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ approved: approved })
   }).then(refreshApprovals);
 }
 function refreshApprovals() {
-  fetch('/api/approvals').then(function (r) { return r.json(); }).then(function (list) {
+  fetch(api('/api/approvals')).then(function (r) { return r.json(); }).then(function (list) {
     var box = document.getElementById('approvalsList');
     box.innerHTML = '';
     if (list.length === 0) { box.textContent = 'No pending approvals.'; return; }
@@ -444,7 +471,7 @@ function refreshApprovals() {
 function loadRun() {
   var id = document.getElementById('runIdInput').value.trim();
   if (!id) return;
-  fetch('/api/runs/' + encodeURIComponent(id))
+  fetch(api('/api/runs/' + encodeURIComponent(id)))
     .then(function (r) { return r.json(); })
     .then(function (d) {
       document.getElementById('transcriptPre').textContent = JSON.stringify(d, null, 2);
