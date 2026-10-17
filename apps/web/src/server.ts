@@ -389,12 +389,21 @@ h1 { font-size: 1.4rem; } h2 { font-size: 1.1rem; margin-top: 1.5rem; border-bot
 button { margin: .1rem .25rem; padding: .3rem .7rem; cursor: pointer; }
 input[type=text] { width: 60%; padding: .3rem; }
 .row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+@media (max-width: 720px) {
+  body { margin: .5rem auto; padding: 0 .75rem; }
+  .row { flex-direction: column; align-items: stretch; }
+  #chatBar { position: sticky; bottom: 0; background: #fff; padding: .5rem 0; border-top: 1px solid #eee; }
+  input[type=text], select { width: 100%; box-sizing: border-box; font-size: 1rem; padding: .5rem; }
+  button { min-height: 44px; font-size: 1rem; padding: .5rem 1rem; }
+  #chatLog div { font-size: 1rem; }
+  .approval button { width: 100%; margin: .25rem 0; }
+}
 </style>
 </head>
 <body>
 <h1>Omni Console</h1>
 
-<div class="row">
+<div class="row" id="chatBar">
   <label>Agent: <select id="agentSelect"></select></label>
   <input type="text" id="chatInput" placeholder="Ask something…">
   <button id="sendBtn">Send</button>

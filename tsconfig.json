@@ -49,6 +49,12 @@
     },
     {
       "path": "packages/packs"
+    },
+    {
+      "path": "packages/voice"
+    },
+    {
+      "path": "packages/channels-x"
     }
   ]
 }

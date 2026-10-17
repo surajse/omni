@@ -108,9 +108,26 @@ experience gaps — each a direct answer to a rival's best weapon:
   guard, per-agent policies never bypassed, JSONL history. `omni group
   create/list/chat`. Docs: GROUPS.md. (Answers Grok Bot group chats.)
 
-## What's next (post-1.1)
+## v1.2 — Voice + X (this release)
 
-- Voice channel (pluggable STT/TTS), X adapter (post/reply/mention-watch)
+- **Voice** (`@omni/voice`): STT/TTS over OpenAI-compatible audio endpoints
+  (zero deps, hand-rolled multipart); Telegram voice notes transcribed to
+  text, optional audio replies via `sendAudio`; `OMNI_STT_*`/`OMNI_TTS_*`
+  env config. Docs: VOICE.md.
+- **X adapter** (`@omni/channels-x`): mentions polling + threaded replies over
+  the X API v2 with hand-rolled OAuth 1.0a (node:crypto, zero deps); 429
+  backoff, self-reply skip, `since_id` tracking; `omni x <id> [--poll N]`.
+  Docs: CHANNELS.md (setup + automation-rules warning).
+- **Web console mobile pass**: viewport + responsive CSS (single column,
+  44px tap targets, sticky chat bar).
+- **Killer demo** (`examples/killer-demo.md`): the "better than all"
+  walkthrough — import a real Grok plugin, add watchers/docs/group chat.
+- Honestly out: OpenAI-connector importer — connectors are OAuth app
+  integrations with no portable export format, so there is nothing real to
+  import; documented as a non-goal, not shipped as theater.
+
+## What's next (post-1.2)
+
 - Hosted relay: share agents without self-hosting (same policy engine + audit log)
 - Mobile app (the agent in your pocket, on your server)
 - Marketplace curation: signed plugin manifests, review queue, usage/cost tracking

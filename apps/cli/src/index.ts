@@ -32,7 +32,10 @@ import { ConsoleChannel } from '@omni/channels';
 import { DockerRuntime, registerComputerTools } from '@omni/sandbox';
 import type { ContainerRuntime } from '@omni/sandbox';
 import { TelegramChannel } from '@omni/channels-telegram';
+import type { VoiceHooks } from '@omni/channels-telegram';
 import { WhatsAppCloudChannel } from '@omni/channels-whatsapp';
+import { XChannel } from '@omni/channels-x';
+import { transcribe, speak, voiceConfigFromEnv } from '@omni/voice';
 import { RoutineStore, Scheduler, matchesCron, validateCron } from '@omni/scheduler';
 import type { Routine } from '@omni/scheduler';
 import { RegistryManager } from '@omni/registry';
@@ -426,6 +429,7 @@ Usage:
   omni routine run [--tick-ms N]          Run the routine daemon (approvals auto-skip)
   omni telegram <id>                      Serve the agent on Telegram (needs TELEGRAM_BOT_TOKEN)
   omni whatsapp <id> [--port N]           Serve the agent on WhatsApp Cloud API
+  omni x <id> [--poll N]                  Watch X mentions and reply in thread (needs X_* env vars)
   omni sandbox exec <id> "<command>"      Run a command in the agent's Docker sandbox
 
 Environment:
@@ -443,6 +447,18 @@ Environment:
   WHATSAPP_PHONE_NUMBER_ID  WhatsApp Business phone number id
   WHATSAPP_VERIFY_TOKEN   Webhook verify token you chose in the Meta dashboard
   WHATSAPP_PORT           Webhook listen port (default: 3000)
+  X_API_KEY               X app API key (consumer key)
+  X_API_SECRET            X app API key secret (consumer secret)
+  X_ACCESS_TOKEN          X user access token
+  X_ACCESS_TOKEN_SECRET   X user access token secret
+  X_POLL_SECONDS          Mention poll interval for "omni x" (default: 120)
+  OMNI_STT_MODEL          STT model for voice (e.g. whisper-1); enables Telegram voice
+  OMNI_STT_API_KEY        API key for the STT endpoint
+  OMNI_STT_BASE_URL       STT endpoint base URL (default: https://api.openai.com/v1)
+  OMNI_TTS_MODEL          TTS model (e.g. tts-1); enables audio replies
+  OMNI_TTS_API_KEY        API key for the TTS endpoint
+  OMNI_TTS_BASE_URL       TTS endpoint base URL (default: https://api.openai.com/v1)
+  OMNI_TTS_VOICE          TTS voice (default: alloy)
 
 Notes:
   - In "routine run" daemon mode there is no human to approve: write-class
@@ -670,6 +686,24 @@ async function cmdRoutineRun(tickMs: number): Promise<void> {
   });
 }
 
+/**
+ * Build Telegram voice hooks from env (OMNI_STT_* and OMNI_TTS_*).
+ * Returns undefined when voice is not configured — the bot stays text-only.
+ */
+function buildVoiceHooks(): VoiceHooks | undefined {
+  const cfg = voiceConfigFromEnv();
+  if (!cfg) return undefined;
+  const hooks: VoiceHooks = {
+    stt: (audio, filename) => transcribe(audio, filename, { ...cfg.stt }),
+  };
+  if (cfg.tts) {
+    const ttsCfg = cfg.tts;
+    hooks.tts = (text) => speak(text, { ...ttsCfg });
+    hooks.replyWithAudio = true;
+  }
+  return hooks;
+}
+
 async function cmdTelegram(id: string): Promise<void> {
   const token = process.env['TELEGRAM_BOT_TOKEN'];
   if (!token) {
@@ -681,6 +715,7 @@ async function cmdTelegram(id: string): Promise<void> {
   const channel = new TelegramChannel({
     botToken: token,
     allowedUserIds: parseIdList(process.env['TELEGRAM_ALLOWED_USERS']),
+    voice: buildVoiceHooks(),
   });
   // Approvals for Telegram-originated runs arrive as inline Approve/Deny
   // buttons in the chat itself (no console access needed).
@@ -870,6 +905,66 @@ async function cmdWeb(portOpt: number | undefined): Promise<void> {
   await new Promise<never>(() => {
     // run until a signal arrives
   });
+}
+
+async function cmdX(id: string, rest: string[]): Promise<void> {
+  const missing = (
+    [
+      ['X_API_KEY', process.env['X_API_KEY']],
+      ['X_API_SECRET', process.env['X_API_SECRET']],
+      ['X_ACCESS_TOKEN', process.env['X_ACCESS_TOKEN']],
+      ['X_ACCESS_TOKEN_SECRET', process.env['X_ACCESS_TOKEN_SECRET']],
+    ] as const
+  )
+    .filter(([, v]) => !v)
+    .map(([k]) => k);
+  if (missing.length > 0) {
+    console.error(`Missing X credentials: ${missing.join(', ')}`);
+    console.error('Create an app at https://developer.x.com, authorize a user, then set the four X_* env vars (see docs/CHANNELS.md).');
+    process.exit(1);
+  }
+  const pollIdx = rest.indexOf('--poll');
+  const pollSeconds = pollIdx >= 0 ? Number(rest[pollIdx + 1]) : Number(process.env['X_POLL_SECONDS'] ?? '120');
+  if (!Number.isFinite(pollSeconds) || pollSeconds < 15) {
+    console.error('--poll must be a number of seconds >= 15');
+    process.exit(1);
+  }
+  const home = omniHome();
+  const config = getAgentConfig(home, id);
+  const channel = new XChannel({
+    consumerKey: process.env['X_API_KEY']!,
+    consumerSecret: process.env['X_API_SECRET']!,
+    accessToken: process.env['X_ACCESS_TOKEN']!,
+    accessTokenSecret: process.env['X_ACCESS_TOKEN_SECRET']!,
+    pollIntervalMs: pollSeconds * 1000,
+  });
+  // No interactive UI for X-originated runs: console y/n approvals.
+  const { agent, memory } = await createAgentStack(home, config, {
+    approve: (req) => askApproval(`[x] Allow tool "${req.tool}" with args ${JSON.stringify(req.args)}?`),
+    onEvent: progressEvents(),
+    withSandbox: true,
+  });
+  channel.onMessage(async (text) => {
+    try {
+      return (await agent.run(text, { maxSteps: 8 })) || '(no reply)';
+    } catch (err) {
+      return `Error: ${friendlyError(err)}`;
+    }
+  });
+  console.log(`X mention watcher live for ${config.name} (${config.id}). Ctrl+C to stop.`);
+  const shutdown = (): void => {
+    void channel.stop().finally(() => {
+      memory.close();
+      process.exit(0);
+    });
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+  try {
+    await channel.start();
+  } finally {
+    memory.close();
+  }
 }
 
 async function cmdSandboxExec(agentId: string, command: string): Promise<void> {
@@ -1519,6 +1614,13 @@ function cmdDoctor(): void {
     const set = !!process.env[v];
     rows.push([v, set, set ? 'set' : 'not set']);
   }
+  for (const v of ['X_API_KEY', 'X_API_SECRET', 'X_ACCESS_TOKEN', 'X_ACCESS_TOKEN_SECRET']) {
+    const set = !!process.env[v];
+    rows.push([v, set, set ? 'set' : 'not set']);
+  }
+  const voiceCfg = voiceConfigFromEnv();
+  rows.push(['voice (STT)', !!voiceCfg, voiceCfg ? `model ${voiceCfg.stt.model}` : 'not configured (OMNI_STT_MODEL/OMNI_STT_API_KEY)']);
+  rows.push(['voice (TTS)', !!voiceCfg?.tts, voiceCfg?.tts ? `model ${voiceCfg.tts.model}` : 'not configured (OMNI_TTS_MODEL/OMNI_TTS_API_KEY)']);
   let sources = 0;
   try {
     sources = new RegistryManager(home).listSources().length;
@@ -1728,6 +1830,13 @@ export async function main(argv: string[]): Promise<void> {
         process.exit(1);
       }
       await cmdWhatsapp(rest[0], rest.slice(1));
+      break;
+    case 'x':
+      if (!rest[0]) {
+        console.error('x requires <agent-id>');
+        process.exit(1);
+      }
+      await cmdX(rest[0], rest.slice(1));
       break;
     case 'sandbox':
       if (rest[0] === 'exec') {

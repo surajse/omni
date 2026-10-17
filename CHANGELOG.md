@@ -2,6 +2,35 @@
 
 All notable changes to Omni. Format: Keep a Changelog.
 
+## [1.2.0] — 2026-10-17
+
+**Voice + X.**
+
+### Added
+- Voice (`@omni/voice`, zero deps): `transcribe()` over OpenAI-compatible
+  `/audio/transcriptions` (hand-rolled multipart) and `speak()` over
+  `/audio/speech`; works with OpenAI, Groq, or a local Whisper server.
+  `voiceConfigFromEnv()` reads `OMNI_STT_*`/`OMNI_TTS_*`; unset keys mean
+  voice stays off. Docs: VOICE.md.
+- Telegram voice messages (`@omni/channels-telegram`): inbound voice/audio
+  notes are downloaded (`getFile`) and transcribed; with TTS configured,
+  replies go back as `sendAudio` mp3 with the text as caption (1024-char cap).
+  Without voice config, the bot politely declines voice notes.
+- X adapter (`@omni/channels-x`, zero deps): hand-rolled OAuth 1.0a
+  (HMAC-SHA1, node:crypto), mentions polling + threaded replies over the X
+  API v2, 429 backoff, self-reply skip, `since_id` tracking;
+  `omni x <id> [--poll N]` with friendly missing-credential errors.
+  Docs: CHANNELS.md (includes automation-rules warning).
+- Web console mobile pass: viewport + responsive CSS (single column under
+  720px, 44px tap targets, sticky chat bar).
+- Killer demo (`examples/killer-demo.md`): the "better than all" walkthrough —
+  import a real Grok plugin, then add watchers/docs/group chat on top.
+
+### Honestly out
+- OpenAI-connector importer: connectors are OAuth app integrations with no
+  portable export format — nothing real to import. Documented as a non-goal,
+  not shipped as theater.
+
 ## [1.1.0] — 2026-10-17
 
 **"Better Than All": the experience layer.**

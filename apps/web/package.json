@@ -19,5 +19,5 @@
   "name": "@omni/web",
   "type": "module",
   "types": "./dist/src/index.d.ts",
-  "version": "1.1.0"
+  "version": "1.2.0"
 }

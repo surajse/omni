@@ -24,6 +24,8 @@ export default defineConfig({
       '@omni/importers': src('importers'),
       '@omni/watchers': src('watchers'),
       '@omni/packs': src('packs'),
+      '@omni/voice': src('voice'),
+      '@omni/channels-x': src('channels-x'),
     },
   },
   test: {

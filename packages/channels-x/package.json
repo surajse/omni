@@ -1,0 +1,1 @@
+{"dependencies":{"@omni/channels":"workspace:*"},"description":"Omni channel adapter: X (Twitter) mentions via API v2 with OAuth 1.0a.","engines":{"node":">=22"},"exports":{".":{"default":"./dist/src/index.js","types":"./dist/src/index.d.ts"}},"files":["dist"],"main":"./dist/src/index.js","name":"@omni/channels-x","type":"module","types":"./dist/src/index.d.ts","version":"1.2.0"}

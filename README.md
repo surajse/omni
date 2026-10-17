@@ -8,8 +8,8 @@ MCP tool servers, per-agent Docker computers, persistent + vector memory,
 skills learned from demonstration, agent-to-agent handoff, group chat rooms,
 proactive watchers, per-agent document workspaces, one-command specialist
 packs, a plugin registry (including a real `.grok-plugin` importer), and
-channels spanning console, web, Telegram, and WhatsApp. No vendor lock-in,
-no mandatory cloud, no subscription meter.
+channels spanning console, web, Telegram (with voice notes), WhatsApp, and X.
+No vendor lock-in, no mandatory cloud, no subscription meter.
 
 ## Install
 
@@ -56,6 +56,13 @@ pnpm exec omni run friday "remember that my favorite color is blue, then tell me
 | `WHATSAPP_PHONE_NUMBER_ID` | WhatsApp Business phone number id            |
 | `WHATSAPP_VERIFY_TOKEN` | Webhook verify token (your choice)             |
 | `WHATSAPP_PORT` | Webhook listen port (default `3000`)                 |
+| `X_API_KEY` / `X_API_SECRET` | X app credentials (consumer key/secret) |
+| `X_ACCESS_TOKEN` / `X_ACCESS_TOKEN_SECRET` | X user tokens |
+| `X_POLL_SECONDS` | Mention poll interval for `omni x` (default `120`) |
+| `OMNI_STT_MODEL` / `OMNI_STT_API_KEY` | STT (e.g. `whisper-1`) — enables Telegram voice notes |
+| `OMNI_STT_BASE_URL` | STT base URL (default `https://api.openai.com/v1`) |
+| `OMNI_TTS_MODEL` / `OMNI_TTS_API_KEY` | TTS (e.g. `tts-1`) — enables audio replies |
+| `OMNI_TTS_BASE_URL` / `OMNI_TTS_VOICE` | TTS base URL / voice (default `alloy`) |
 | `OMNI_WEB_PORT` | Web console port (default `8080`; `omni web --port` overrides) |
 | `OMNI_WEB_TOKEN` | Optional web console token — when set, every `/` and `/api/*` request needs `?token=` (set one if you bind wider than localhost) |
 | `OMNI_TEAMS_ROOT` | Teams root dir (default `~/.omni/teams`); point at a shared git repo / synced folder |

@@ -1,13 +1,27 @@
 // TelegramChannel: Channel over the Telegram Bot API using long-polling
 // (getUpdates). No webhook server needed — works behind NAT. The bot token is
-// never logged.
+// never logged. Optional voice support: inbound voice/audio messages are
+// transcribed to text; replies can go back as audio.
+import { randomBytes } from 'node:crypto';
 import type { Channel } from '@omni/channels';
+
+/** Voice hooks: injectable so the CLI can wire real @omni/voice clients. */
+export interface VoiceHooks {
+  /** Transcribe audio bytes (ogg/mp3/…) to text. */
+  stt: (audio: Buffer, filename: string) => Promise<string>;
+  /** Synthesize reply audio. Required for replyWithAudio. */
+  tts?: (text: string) => Promise<Buffer>;
+  /** When true and the trigger was a voice message, reply with sendAudio. */
+  replyWithAudio?: boolean;
+}
 
 export interface TelegramChannelOptions {
   /** Bot token from @BotFather. Passed via env TELEGRAM_BOT_TOKEN in the CLI. */
   botToken: string;
   /** Telegram user ids allowed to talk to the agent. Omit to allow everyone. */
   allowedUserIds?: number[];
+  /** Voice hooks (STT/TTS). Omit to disable voice messages. */
+  voice?: VoiceHooks;
   /** Injectable for tests. */
   fetchImpl?: typeof fetch;
 }
@@ -19,6 +33,8 @@ interface TgUpdate {
     from?: { id: number };
     chat: { id: number };
     text?: string;
+    voice?: { file_id: string; duration?: number };
+    audio?: { file_id: string };
   };
   callback_query?: {
     id: string;
@@ -41,6 +57,8 @@ interface PendingApproval {
 }
 
 const MAX_MESSAGE_LENGTH = 4000;
+/** Telegram caption limit for audio messages. */
+const MAX_CAPTION_LENGTH = 1024;
 
 /** Escape text for Telegram's HTML parse mode. */
 function escapeHtml(text: string): string {
@@ -65,6 +83,7 @@ export class TelegramChannel implements Channel {
   readonly id = 'telegram';
   private readonly botToken: string;
   private readonly allowedUserIds?: number[];
+  private readonly voice?: VoiceHooks;
   private readonly fetchImpl: typeof fetch;
   private handler: ((text: string) => Promise<string | void>) | null = null;
   private chatId: number | null = null;
@@ -81,6 +100,7 @@ export class TelegramChannel implements Channel {
     if (!opts.botToken) throw new Error('TelegramChannel: botToken is required');
     this.botToken = opts.botToken;
     this.allowedUserIds = opts.allowedUserIds;
+    this.voice = opts.voice;
     this.fetchImpl = opts.fetchImpl ?? fetch;
   }
 
@@ -213,16 +233,27 @@ export class TelegramChannel implements Channel {
       return;
     }
     const msg = update.message;
-    if (!msg?.text || !this.handler) return;
+    if (!msg || !this.handler) return;
     const fromId = msg.from?.id;
     if (this.allowedUserIds && (fromId === undefined || !this.allowedUserIds.includes(fromId))) {
       return; // silently ignore users outside the allowlist
     }
     this.chatId = msg.chat.id;
-    // Fire-and-forget: the handler may block on requestApproval(), which needs
-    // the poll loop to keep running so the user's button tap can arrive.
-    // stop() waits for in-flight handlers, so shutdown stays clean.
-    const task = this.handleMessage(msg.text);
+    if (msg.text) {
+      // Fire-and-forget: the handler may block on requestApproval(), which needs
+      // the poll loop to keep running so the user's button tap can arrive.
+      // stop() waits for in-flight handlers, so shutdown stays clean.
+      this.track(this.handleMessage(msg.text, false));
+      return;
+    }
+    const voiceFileId = msg.voice?.file_id ?? msg.audio?.file_id;
+    if (voiceFileId) {
+      this.track(this.handleVoiceMessage(voiceFileId));
+    }
+  }
+
+  /** Track an in-flight message handler so stop() can wait for it. */
+  private track(task: Promise<void>): void {
     this.inflight.add(task);
     task.then(
       () => this.inflight.delete(task),
@@ -233,11 +264,61 @@ export class TelegramChannel implements Channel {
     );
   }
 
-  private async handleMessage(text: string): Promise<void> {
+  private async handleMessage(text: string, viaVoice: boolean): Promise<void> {
     const reply = await this.handler?.(text);
     if (typeof reply === 'string' && reply.length > 0) {
-      await this.send(reply);
+      if (viaVoice && this.voice?.replyWithAudio && this.voice.tts) {
+        await this.sendAudio(await this.voice.tts(reply), reply);
+      } else {
+        await this.send(reply);
+      }
     }
+  }
+
+  /** Download a voice/audio message, transcribe it, and handle it as text. */
+  private async handleVoiceMessage(fileId: string): Promise<void> {
+    if (!this.voice?.stt) {
+      await this.send('🎙️ Voice messages are not enabled for this bot yet.');
+      return;
+    }
+    const audio = await this.downloadFile(fileId);
+    const text = await this.voice.stt(audio, 'voice.ogg');
+    await this.handleMessage(text, true);
+  }
+
+  /** getFile → download bytes from the Telegram file endpoint. */
+  private async downloadFile(fileId: string): Promise<Buffer> {
+    const res = await this.fetchImpl(
+      `https://api.telegram.org/bot${this.botToken}/getFile?file_id=${encodeURIComponent(fileId)}`,
+    );
+    if (!res.ok) throw new Error(`Telegram getFile failed: HTTP ${res.status}`);
+    const data = (await res.json()) as { ok: boolean; result?: { file_path?: string } };
+    const filePath = data.result?.file_path;
+    if (!filePath) throw new Error('Telegram getFile: no file_path in response');
+    const dl = await this.fetchImpl(`https://api.telegram.org/file/bot${this.botToken}/${filePath}`);
+    if (!dl.ok) throw new Error(`Telegram file download failed: HTTP ${dl.status}`);
+    return Buffer.from(await dl.arrayBuffer());
+  }
+
+  /** Send an audio reply (multipart) with the text as caption. */
+  private async sendAudio(audio: Buffer, caption: string): Promise<void> {
+    if (this.chatId === null) {
+      throw new Error('TelegramChannel: no chat bound yet — sendAudio needs an incoming message first');
+    }
+    const boundary = '----omni' + randomBytes(16).toString('hex');
+    const cap = caption.length > MAX_CAPTION_LENGTH ? caption.slice(0, MAX_CAPTION_LENGTH - 1) + '…' : caption;
+    const head = Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${this.chatId}\r\n` +
+        `--${boundary}\r\nContent-Disposition: form-data; name="audio"; filename="reply.mp3"\r\n` +
+        `Content-Type: audio/mpeg\r\n\r\n`,
+    );
+    const tail = Buffer.from(`\r\n--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${cap}\r\n--${boundary}--\r\n`);
+    const res = await this.fetchImpl(`https://api.telegram.org/bot${this.botToken}/sendAudio`, {
+      method: 'POST',
+      headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+      body: Buffer.concat([head, audio, tail]),
+    });
+    if (!res.ok) throw new Error(`Telegram sendAudio failed: HTTP ${res.status}`);
   }
 
   private async handleCallbackQuery(

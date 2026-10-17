@@ -57,6 +57,42 @@ Security notes:
 - WhatsApp automation is subject to Meta's policies; prefer the official API
   (this channel) over unofficial bridges.
 
+## X (Twitter) (`@omni/channels-x`)
+
+Watches your mentions and replies in-thread, over the X API v2 with
+hand-rolled OAuth 1.0a (user context) — zero dependencies.
+
+Setup (one-time, in the [X developer portal](https://developer.x.com)):
+
+1. Create a **Project + App** with read+write permissions.
+2. Under the app's **Keys and tokens**: note the **API Key / API Key Secret**
+   (`X_API_KEY`, `X_API_SECRET`).
+3. Under **Authentication Tokens**: generate an **Access Token / Access Token
+   Secret** for your user (`X_ACCESS_TOKEN`, `X_ACCESS_TOKEN_SECRET`).
+   The app needs the free/basic tier with v2 write access.
+4. Run: `omni x <agent-id> [--poll 120]` (poll interval in seconds, ≥ 15;
+   `X_POLL_SECONDS` env also works).
+
+How it works:
+- On start, the channel resolves your user id via `GET /2/users/me`.
+- Every poll it fetches `GET /2/users/:id/mentions` (newest first, handled
+  oldest-first so reply order is natural), advancing `since_id` each time.
+- Each mention goes to the agent; the agent's reply is posted as a threaded
+  reply (`in_reply_to_tweet_id`). Your own tweets are never answered.
+- `send(text)` posts a standalone tweet (≤ 280 chars; longer text is
+  truncated with `…`).
+
+Automation rules — read this before going live:
+- **X's automation rules apply.** Only reply to genuine mentions, keep replies
+  useful and non-spammy, and respect rate limits (the channel backs off on
+  HTTP 429 using `retry-after`). Aggressive auto-replying gets accounts
+  suspended — start with a small audience and watch the behavior.
+- `since_id` tracking is in-memory: a restart may re-see the most recent
+  mentions (they get re-handled, not duplicated as new replies — but the
+  agent will run again). For production, keep the process running.
+- Approvals for X-originated runs use the console y/n prompt (`askApproval`) —
+  run it where you can see the terminal, or keep write-class tools deny-gated.
+
 ## Approvals over channels
 
 - **Telegram:** interactive approval prompts (`ask` policy) arrive as

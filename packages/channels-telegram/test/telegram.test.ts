@@ -285,3 +285,150 @@ describe('TelegramChannel inline approvals', () => {
     expect(ch.pendingApprovalCount()).toBe(0);
   });
 });
+
+describe('TelegramChannel voice', () => {
+  interface VoiceTgUpdate {
+    update_id: number;
+    message?: {
+      message_id: number;
+      from?: { id: number };
+      chat: { id: number };
+      text?: string;
+      voice?: { file_id: string };
+      audio?: { file_id: string };
+    };
+  }
+
+  function voiceUpdate(updateId: number, chatId: number, fileId: string): VoiceTgUpdate {
+    return { update_id: updateId, message: { message_id: 1, from: { id: 42 }, chat: { id: chatId }, voice: { file_id: fileId } } };
+  }
+
+  /** Mock fetch serving: getUpdates, getFile, file download, sendAudio/sendMessage. */
+  function voiceMock(opts: {
+    updates: VoiceTgUpdate[];
+    audioBytes: Buffer;
+    onSendAudio: (body: Buffer, contentType: string) => void;
+    onSendMessage: (body: unknown) => void;
+    stop: () => void | Promise<void>;
+  }) {
+    let polls = 0;
+    return async (url: string, init?: { body?: unknown; headers?: Record<string, string> }) => {
+      const u = String(url);
+      if (u.includes('/getUpdates')) {
+        polls++;
+        if (polls >= 2) await opts.stop();
+        return { ok: true, status: 200, json: async () => ({ ok: true, result: polls === 1 ? opts.updates : [] }) } as Response;
+      }
+      if (u.includes('/getFile')) {
+        return { ok: true, status: 200, json: async () => ({ ok: true, result: { file_path: 'voice/f1.ogg' } }) } as Response;
+      }
+      if (u.includes('/file/bot')) {
+        return {
+          ok: true,
+          status: 200,
+          arrayBuffer: async () => opts.audioBytes.buffer.slice(opts.audioBytes.byteOffset, opts.audioBytes.byteOffset + opts.audioBytes.byteLength),
+        } as unknown as Response;
+      }
+      if (u.includes('/sendAudio')) {
+        const headers = (init?.headers ?? {}) as Record<string, string>;
+        opts.onSendAudio(init?.body as Buffer, headers['content-type'] ?? '');
+        return { ok: true, status: 200, json: async () => ({ ok: true, result: true }) } as Response;
+      }
+      opts.onSendMessage(typeof init?.body === 'string' ? JSON.parse(init.body) : init?.body);
+      return { ok: true, status: 200, json: async () => ({ ok: true, result: true }) } as Response;
+    };
+  }
+
+  it('transcribes a voice message and replies with audio when configured', async () => {
+    const sttCalls: Array<{ bytes: Buffer; filename: string }> = [];
+    const ttsCalls: string[] = [];
+    const sentAudio: Array<{ body: Buffer; contentType: string }> = [];
+    const sentMessages: unknown[] = [];
+    let ch: TelegramChannel;
+    const fetchImpl = voiceMock({
+      updates: [voiceUpdate(7, 100, 'file_abc')],
+      audioBytes: Buffer.from([10, 20, 30]),
+      onSendAudio: (body, contentType) => sentAudio.push({ body, contentType }),
+      onSendMessage: (body) => sentMessages.push(body),
+      stop: () => ch.stop(),
+    }) as unknown as typeof fetch;
+
+    ch = new TelegramChannel({
+      botToken: 'T',
+      fetchImpl,
+      voice: {
+        stt: async (audio, filename) => {
+          sttCalls.push({ bytes: audio, filename });
+          return 'transcribed hello';
+        },
+        tts: async (text) => {
+          ttsCalls.push(text);
+          return Buffer.from([1, 2, 3]);
+        },
+        replyWithAudio: true,
+      },
+    });
+    const seen: string[] = [];
+    ch.onMessage(async (t) => {
+      seen.push(t);
+      return 'reply text here';
+    });
+    await ch.start();
+
+    expect(seen).toEqual(['transcribed hello']);
+    expect(sttCalls).toHaveLength(1);
+    expect(sttCalls[0]!.bytes).toEqual(Buffer.from([10, 20, 30]));
+    expect(ttsCalls).toEqual(['reply text here']);
+    expect(sentAudio).toHaveLength(1);
+    expect(sentAudio[0]!.contentType).toMatch(/^multipart\/form-data; boundary=/);
+    const multipart = sentAudio[0]!.body.toString('latin1');
+    expect(multipart).toContain('name="audio"; filename="reply.mp3"');
+    expect(multipart).toContain('name="caption"');
+    expect(multipart).toContain('reply text here');
+    expect(sentMessages).toHaveLength(0);
+  });
+
+  it('replies with text when replyWithAudio is off', async () => {
+    const sentMessages: unknown[] = [];
+    const sentAudio: Array<{ body: Buffer; contentType: string }> = [];
+    let ch: TelegramChannel;
+    const fetchImpl = voiceMock({
+      updates: [voiceUpdate(8, 100, 'file_def')],
+      audioBytes: Buffer.from([5]),
+      onSendAudio: (body, contentType) => sentAudio.push({ body, contentType }),
+      onSendMessage: (body) => sentMessages.push(body),
+      stop: () => ch.stop(),
+    }) as unknown as typeof fetch;
+
+    ch = new TelegramChannel({
+      botToken: 'T',
+      fetchImpl,
+      voice: { stt: async () => 'hi there' },
+    });
+    ch.onMessage(async (t) => `echo:${t}`);
+    await ch.start();
+
+    expect(sentAudio).toHaveLength(0);
+    expect(sentMessages).toHaveLength(1);
+    expect((sentMessages[0] as { text?: string }).text).toBe('echo:hi there');
+  });
+
+  it('politely declines voice when not configured', async () => {
+    const sentMessages: unknown[] = [];
+    let ch: TelegramChannel;
+    const fetchImpl = voiceMock({
+      updates: [voiceUpdate(9, 100, 'file_ghi')],
+      audioBytes: Buffer.from([5]),
+      onSendAudio: () => {},
+      onSendMessage: (body) => sentMessages.push(body),
+      stop: () => ch.stop(),
+    }) as unknown as typeof fetch;
+
+    ch = new TelegramChannel({ botToken: 'T', fetchImpl });
+    ch.onMessage(async () => 'should not be called');
+    await ch.start();
+
+    expect(sentMessages).toHaveLength(1);
+    expect((sentMessages[0] as { text?: string }).text).toMatch(/not enabled/);
+  });
+});
