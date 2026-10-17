@@ -1,0 +1,20 @@
+import { defineConfig } from 'vitest/config';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+
+const root = fileURLToPath(new URL('.', import.meta.url));
+const src = (pkg: string) => path.join(root, 'packages', pkg, 'src', 'index.ts');
+
+export default defineConfig({
+  resolve: {
+    alias: {
+      '@omni/kernel': src('kernel'),
+      '@omni/memory': src('memory'),
+      '@omni/plugin-spec': src('plugin-spec'),
+      '@omni/channels': src('channels'),
+    },
+  },
+  test: {
+    include: ['packages/*/test/**/*.test.ts', 'apps/*/test/**/*.test.ts'],
+  },
+});

@@ -1,0 +1,1 @@
+{"extends":"./tsconfig.base.json","files":[],"references":[{"path":"packages/kernel"},{"path":"packages/memory"},{"path":"packages/plugin-spec"},{"path":"packages/channels"},{"path":"apps/cli"}]}
