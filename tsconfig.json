@@ -1,1 +1,1 @@
-{"extends":"./tsconfig.base.json","files":[],"references":[{"path":"packages/kernel"},{"path":"packages/memory"},{"path":"packages/plugin-spec"},{"path":"packages/channels"},{"path":"apps/cli"}]}
+{"extends":"./tsconfig.base.json","files":[],"references":[{"path":"packages/kernel"},{"path":"packages/memory"},{"path":"packages/plugin-spec"},{"path":"packages/channels"},{"path":"packages/sandbox"},{"path":"packages/channels-telegram"},{"path":"packages/channels-whatsapp"},{"path":"packages/scheduler"},{"path":"apps/cli"}]}

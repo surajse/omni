@@ -12,6 +12,10 @@ export default defineConfig({
       '@omni/memory': src('memory'),
       '@omni/plugin-spec': src('plugin-spec'),
       '@omni/channels': src('channels'),
+      '@omni/sandbox': src('sandbox'),
+      '@omni/channels-telegram': src('channels-telegram'),
+      '@omni/channels-whatsapp': src('channels-whatsapp'),
+      '@omni/scheduler': src('scheduler'),
     },
   },
   test: {

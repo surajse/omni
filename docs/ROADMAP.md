@@ -1,6 +1,6 @@
 # Omni Roadmap
 
-## v0.1 — Agent kernel (this release)
+## v0.1 — Agent kernel (shipped)
 
 - Provider-agnostic agent loop (OpenAI-compatible + mock)
 - Tool gateway with sync/async handlers
@@ -12,19 +12,33 @@
 - Channel abstraction + console channel
 - `omni` CLI: init / list / chat / run / plugin validate
 
-## v0.2 — Sandboxed computer + channels
+## v0.2 — Sandboxed computer + channels (this release)
 
-- Sandboxed tool execution (deny-by-default filesystem/network scopes)
-- Real channels: Telegram, web chat widget; channel permission mapping
+- Per-agent Docker sandbox: container `omni-<id>` + persistent volume at `/home/agent`
+- `computer.exec` / `computer.read_file` / `computer.write_file` tools (policy-gated)
+- `ContainerRuntime` interface + `MockRuntime` (tests never need Docker)
+- Telegram channel (Bot API long-polling, allowlist, auto-chunking)
+- WhatsApp Cloud API channel (webhook verify + inbound/outbound via Graph API v21.0)
+- Routine scheduler: 5-field cron matcher, JSON routine store, ticking daemon
+  (`routine add/list/remove/run`; daemon auto-skips approvals, logged)
+- Docs: CHANNELS.md, SANDBOX.md (incl. honest Docker-not-exercised-here note)
+- `omni` CLI: routine, telegram, whatsapp, sandbox exec
+
+## v0.3 — Trust hardening + teams
+
+- Sandbox hardening: per-agent egress network policy, image digest pinning by default
+- Approvals over the channel (approve/deny buttons in Telegram/WhatsApp, not just console)
 - Plugin loader in the CLI (install from manifest, `mcp-stdio` supervision)
-- Approvals over the channel (not just console y/n)
-- Memory: semantic recall, per-agent export/import commands
+- Memory: semantic recall (sqlite-vec, still local), per-agent export/import commands
+- Multi-agent: sub-agents, handoffs, shared task state
 
-## v0.3 — Teams and sharing
+## v0.4 — Distribution
 
-- Multi-agent runs: sub-agents, handoffs, shared task state
-- Signed plugin marketplace entries (provenance for manifests)
+- `.omni-plugin` registry (git-based index)
+- `.grok-plugin` importer (install rivals' plugins into Omni agents)
+- OpenDots dot importer
 - Usage/cost tracking per agent and per tool
+- Signed plugin manifests (provenance)
 
 ## v1.0 — The universal agent
 

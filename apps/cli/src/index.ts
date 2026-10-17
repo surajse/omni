@@ -2,7 +2,7 @@
 // Omni CLI: init / list / chat / run / plugin validate.
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { mkdirSync, readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import {
@@ -13,10 +13,15 @@ import {
   PolicyEngine,
   ToolGateway,
 } from '@omni/kernel';
-import type { AgentConfig, ModelProvider } from '@omni/kernel';
+import type { AgentConfig, ApprovalHandler, ModelProvider, RunEvent } from '@omni/kernel';
 import { SqliteMemoryStore } from '@omni/memory';
 import { validateManifest } from '@omni/plugin-spec';
 import { ConsoleChannel } from '@omni/channels';
+import { DockerRuntime, registerComputerTools } from '@omni/sandbox';
+import { TelegramChannel } from '@omni/channels-telegram';
+import { WhatsAppCloudChannel } from '@omni/channels-whatsapp';
+import { RoutineStore, Scheduler, validateCron } from '@omni/scheduler';
+import type { Routine } from '@omni/scheduler';
 
 export function slugify(name: string): string {
   return (
@@ -124,6 +129,118 @@ function buildGateway(home: string): { gateway: ToolGateway; memory: SqliteMemor
   return { gateway, memory };
 }
 
+function agentHomeDir(home: string, agentId: string): string {
+  return join(home, 'agents', agentId);
+}
+
+function getAgentConfig(home: string, id: string): AgentConfig {
+  return new AgentRegistry(join(home, 'agents')).get(id);
+}
+
+/** Agent homes that exist on disk (each may hold a routines.json). */
+function eachAgentHome(home: string): string[] {
+  const agentsDir = join(home, 'agents');
+  try {
+    return readdirSync(agentsDir, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => join(agentsDir, d.name));
+  } catch {
+    return [];
+  }
+}
+
+function progressEvents(): (e: RunEvent) => void {
+  return (e) => {
+    if (e.type === 'tool-call') console.log(`… calling ${e.call.name}`);
+    if (e.type === 'approval') console.log(`… ${e.call.name}: ${e.decision}`);
+  };
+}
+
+interface AgentStack {
+  agent: Agent;
+  memory: SqliteMemoryStore;
+}
+
+/** Build an Agent with the standard tool gateway; optionally attach the Docker sandbox computer. */
+async function createAgentStack(
+  home: string,
+  config: AgentConfig,
+  opts: { approve: ApprovalHandler; onEvent?: (e: RunEvent) => void; withSandbox: boolean },
+): Promise<AgentStack> {
+  const { gateway, memory } = buildGateway(home);
+  if (opts.withSandbox) {
+    await maybeAttachSandbox(gateway, config.id);
+  }
+  const agent = new Agent(config, {
+    provider: buildProvider(),
+    gateway,
+    policy: new PolicyEngine(config.policy),
+    approve: opts.approve,
+    memory,
+    onEvent: opts.onEvent,
+  });
+  return { agent, memory };
+}
+
+/** Best-effort: attach computer.* tools backed by Docker; warn and continue when Docker is missing. */
+async function maybeAttachSandbox(gateway: ToolGateway, agentId: string): Promise<void> {
+  const runtime = new DockerRuntime();
+  try {
+    await runtime.ensureReady();
+  } catch (err) {
+    console.error(
+      `Sandbox unavailable (${err instanceof Error ? err.message : String(err)}) — continuing without computer tools.`,
+    );
+    return;
+  }
+  const id = await runtime.create(agentId);
+  if ((await runtime.status(id)) !== 'running') await runtime.start(id);
+  registerComputerTools(gateway, runtime, id);
+  console.log(`Sandbox ready: container ${runtime.containerName(agentId)}`);
+}
+
+/** Parse `routine add` args; throws on bad input (pure — tested). */
+export function parseRoutineAdd(rest: string[]): { agentId: string; cron: string; task: string } {
+  const [agentId, cron, ...taskParts] = rest;
+  if (!agentId || !cron || taskParts.length === 0) {
+    throw new Error('usage: omni routine add <agent-id> "<cron>" "<task>"');
+  }
+  validateCron(cron);
+  return { agentId, cron, task: taskParts.join(' ') };
+}
+
+/** Parse `--port N`; throws on bad input (pure — tested). */
+export function parsePort(rest: string[]): number | undefined {
+  const i = rest.indexOf('--port');
+  if (i < 0) return undefined;
+  const n = Number(rest[i + 1]);
+  if (!Number.isInteger(n) || n < 1 || n > 65535) throw new Error('--port must be an integer 1-65535');
+  return n;
+}
+
+/** Parse `--tick-ms N` (default 30s); throws on bad input (pure — tested). */
+export function parseTickMs(rest: string[]): number {
+  const i = rest.indexOf('--tick-ms');
+  if (i < 0) return 30_000;
+  const n = Number(rest[i + 1]);
+  if (!Number.isInteger(n) || n < 1000) throw new Error('--tick-ms must be an integer >= 1000');
+  return n;
+}
+
+/** Parse comma-separated Telegram user ids; undefined when unset/empty (pure — tested). */
+export function parseIdList(csv: string | undefined): number[] | undefined {
+  if (!csv) return undefined;
+  const ids = csv
+    .split(',')
+    .map((s) => Number(s.trim()))
+    .filter((n) => Number.isInteger(n));
+  return ids.length > 0 ? ids : undefined;
+}
+
+function errText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 async function askApproval(question: string): Promise<boolean> {
   const rl = createInterface({ input, output });
   try {
@@ -135,19 +252,39 @@ async function askApproval(question: string): Promise<boolean> {
 }
 
 function usage(): string {
-  return `omni — universal agent platform (v0.1)
+  return `omni — universal agent platform (v0.2)
 
 Usage:
-  omni init --name <Name>        Create a new agent (stored in ~/.omni/agents)
-  omni list                      List agents
-  omni chat <id>                 Interactive chat with an agent (/quit to exit)
-  omni run <id> "<task>"         Run a single task and print the result
-  omni plugin validate <file>    Validate an .omni-plugin.json manifest
+  omni init --name <Name>                 Create a new agent (stored in ~/.omni/agents)
+  omni list                               List agents
+  omni chat <id>                          Interactive chat with an agent (/quit to exit)
+  omni run <id> "<task>"                  Run a single task and print the result
+  omni plugin validate <file>             Validate an .omni-plugin.json manifest
+  omni routine add <id> "<cron>" "<task>" Add a scheduled routine (5-field cron)
+  omni routine list [id]                  List routines
+  omni routine remove <routine-id>         Remove a routine
+  omni routine run [--tick-ms N]          Run the routine daemon (approvals auto-skip)
+  omni telegram <id>                      Serve the agent on Telegram (needs TELEGRAM_BOT_TOKEN)
+  omni whatsapp <id> [--port N]           Serve the agent on WhatsApp Cloud API
+  omni sandbox exec <id> "<command>"      Run a command in the agent's Docker sandbox
 
 Environment:
-  OMNI_API_KEY    API key for an OpenAI-compatible endpoint (else the mock provider is used)
-  OMNI_BASE_URL   Base URL for the OpenAI-compatible endpoint (default: https://api.openai.com/v1)
-  OMNI_MODEL      Model name (default: gpt-4o-mini)`;
+  OMNI_API_KEY            API key for an OpenAI-compatible endpoint (else the mock provider is used)
+  OMNI_BASE_URL           Base URL for the OpenAI-compatible endpoint (default: https://api.openai.com/v1)
+  OMNI_MODEL              Model name (default: gpt-4o-mini)
+  OMNI_SANDBOX_IMAGE      Docker image for agent sandboxes (default: ubuntu:24.04)
+  TELEGRAM_BOT_TOKEN      Telegram bot token from @BotFather
+  TELEGRAM_ALLOWED_USERS  Comma-separated Telegram user ids allowed to chat (default: all)
+  WHATSAPP_TOKEN          WhatsApp Cloud API access token
+  WHATSAPP_PHONE_NUMBER_ID  WhatsApp Business phone number id
+  WHATSAPP_VERIFY_TOKEN   Webhook verify token you chose in the Meta dashboard
+  WHATSAPP_PORT           Webhook listen port (default: 3000)
+
+Notes:
+  - In "routine run" daemon mode there is no human to approve: write-class
+    tools are auto-SKIPPED and each skip is logged. Prefer read-only routines.
+  - Sandbox commands need Docker; without it the CLI warns and continues
+    without computer tools.`;
 }
 
 function cmdInit(name: string | undefined): void {
@@ -274,6 +411,215 @@ function cmdPluginValidate(file: string | undefined): void {
   console.log(`OK: valid plugin manifest ${result.manifest.name}@${result.manifest.version}`);
 }
 
+function cmdRoutineAdd(agentId: string, cron: string, task: string): void {
+  const home = omniHome();
+  getAgentConfig(home, agentId); // throws if the agent does not exist
+  const routine = new RoutineStore(agentHomeDir(home, agentId)).add({ agentId, cron, task });
+  console.log(`Added routine ${routine.id} for agent "${agentId}": ${routine.cron} — ${routine.task}`);
+}
+
+function cmdRoutineList(agentId: string | undefined): void {
+  const home = omniHome();
+  const homes = agentId ? [agentHomeDir(home, agentId)] : eachAgentHome(home);
+  let count = 0;
+  for (const dir of homes) {
+    for (const r of new RoutineStore(dir).list()) {
+      if (agentId && r.agentId !== agentId) continue;
+      console.log(`${r.id}\t${r.agentId}\t${r.enabled ? 'on ' : 'off'}\t${r.cron}\t${r.task}`);
+      count++;
+    }
+  }
+  if (count === 0) {
+    console.log('No routines. Add one with: omni routine add <agent-id> "<cron>" "<task>"');
+  }
+}
+
+function cmdRoutineRemove(routineId: string): void {
+  const home = omniHome();
+  for (const dir of eachAgentHome(home)) {
+    const store = new RoutineStore(dir);
+    if (store.list().some((r) => r.id === routineId)) {
+      store.remove(routineId);
+      console.log(`Removed routine ${routineId}`);
+      return;
+    }
+  }
+  console.error(`routine not found: ${routineId}`);
+  process.exit(1);
+}
+
+async function dispatchRoutine(home: string, routine: Routine): Promise<void> {
+  const config = getAgentConfig(home, routine.agentId);
+  const { agent, memory } = await createAgentStack(home, config, {
+    // Daemon mode: no human to ask — auto-skip anything needing approval.
+    approve: async (req) => {
+      console.log(`[routine ${routine.id}] auto-skipped approval for "${req.tool}"`);
+      return false;
+    },
+    onEvent: progressEvents(),
+    withSandbox: true,
+  });
+  try {
+    console.log(`[routine ${routine.id}] running: ${routine.task}`);
+    const out = await agent.run(routine.task);
+    console.log(`[routine ${routine.id}] done: ${(out || '(no reply)').slice(0, 500)}`);
+  } finally {
+    memory.close();
+  }
+}
+
+async function cmdRoutineRun(tickMs: number): Promise<void> {
+  const home = omniHome();
+  const schedulers: Scheduler[] = [];
+  for (const dir of eachAgentHome(home)) {
+    const store = new RoutineStore(dir);
+    if (store.list().length === 0) continue;
+    const sched = new Scheduler(store, { tickMs });
+    const dispatch = (r: Routine): Promise<void> => dispatchRoutine(home, r);
+    sched.start(dispatch);
+    schedulers.push(sched);
+  }
+  if (schedulers.length === 0) {
+    console.log('No routines defined. Add one with: omni routine add <agent-id> "<cron>" "<task>"');
+    return;
+  }
+  console.log(
+    `Routine daemon started (${schedulers.length} agent(s), tick ${tickMs}ms). Ctrl+C to stop.`,
+  );
+  console.log('Note: in daemon mode write-class tools are auto-SKIPPED (no interactive approvals).');
+  const shutdown = (): void => {
+    for (const s of schedulers) s.stop();
+    console.log('\nRoutine daemon stopped.');
+    process.exit(0);
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+  await new Promise<never>(() => {
+    // run until a signal arrives
+  });
+}
+
+async function cmdTelegram(id: string): Promise<void> {
+  const token = process.env['TELEGRAM_BOT_TOKEN'];
+  if (!token) {
+    console.error('TELEGRAM_BOT_TOKEN is not set');
+    process.exit(1);
+  }
+  const home = omniHome();
+  const config = getAgentConfig(home, id);
+  const { agent, memory } = await createAgentStack(home, config, {
+    approve: (req) => askApproval(`Allow tool "${req.tool}" with args ${JSON.stringify(req.args)}?`),
+    onEvent: progressEvents(),
+    withSandbox: true,
+  });
+  const channel = new TelegramChannel({
+    botToken: token,
+    allowedUserIds: parseIdList(process.env['TELEGRAM_ALLOWED_USERS']),
+  });
+  channel.onMessage(async (text) => {
+    try {
+      return (await agent.run(text, { maxSteps: 8 })) || '(no reply)';
+    } catch (err) {
+      return `Error: ${friendlyError(err)}`;
+    }
+  });
+  console.log(`Telegram bot live for ${config.name} (${config.id}). Ctrl+C to stop.`);
+  const shutdown = (): void => {
+    void channel.stop().finally(() => {
+      memory.close();
+      process.exit(0);
+    });
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+  try {
+    await channel.start();
+  } finally {
+    memory.close();
+  }
+}
+
+async function cmdWhatsapp(id: string, rest: string[]): Promise<void> {
+  const phoneNumberId = process.env['WHATSAPP_PHONE_NUMBER_ID'];
+  const accessToken = process.env['WHATSAPP_TOKEN'];
+  const verifyToken = process.env['WHATSAPP_VERIFY_TOKEN'];
+  const missing = [
+    ['WHATSAPP_PHONE_NUMBER_ID', phoneNumberId],
+    ['WHATSAPP_TOKEN', accessToken],
+    ['WHATSAPP_VERIFY_TOKEN', verifyToken],
+  ]
+    .filter(([, v]) => !v)
+    .map(([k]) => k);
+  if (missing.length > 0) {
+    console.error(`Missing environment: ${missing.join(', ')}`);
+    process.exit(1);
+  }
+  let port: number | undefined;
+  try {
+    port = parsePort(rest);
+  } catch (err) {
+    console.error(`Error: ${errText(err)}`);
+    process.exit(1);
+  }
+  const home = omniHome();
+  const config = getAgentConfig(home, id);
+  const { agent, memory } = await createAgentStack(home, config, {
+    approve: (req) => askApproval(`Allow tool "${req.tool}" with args ${JSON.stringify(req.args)}?`),
+    onEvent: progressEvents(),
+    withSandbox: true,
+  });
+  const channel = new WhatsAppCloudChannel({
+    phoneNumberId: phoneNumberId ?? '',
+    accessToken: accessToken ?? '',
+    verifyToken: verifyToken ?? '',
+  });
+  channel.onMessage(async (text) => {
+    try {
+      return (await agent.run(text, { maxSteps: 8 })) || '(no reply)';
+    } catch (err) {
+      return `Error: ${friendlyError(err)}`;
+    }
+  });
+  const listenPort = port ?? 3000;
+  await channel.start(listenPort);
+  console.log(
+    `WhatsApp webhook live for ${config.name} (${config.id}) on port ${listenPort}. Ctrl+C to stop.`,
+  );
+  console.log('Point your Meta webhook at this port (use a tunnel like cloudflared for local dev).');
+  const shutdown = (): void => {
+    void channel.stop().finally(() => {
+      memory.close();
+      process.exit(0);
+    });
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+  await new Promise<never>(() => {
+    // run until a signal arrives
+  });
+}
+
+async function cmdSandboxExec(agentId: string, command: string): Promise<void> {
+  const runtime = new DockerRuntime();
+  try {
+    await runtime.ensureReady();
+  } catch (err) {
+    console.error(`Error: ${errText(err)}`);
+    process.exit(1);
+  }
+  const id = await runtime.create(agentId);
+  if ((await runtime.status(id)) !== 'running') await runtime.start(id);
+  const res = await runtime.exec(id, ['sh', '-c', command]);
+  if (res.stdout) {
+    process.stdout.write(res.stdout.endsWith('\n') ? res.stdout : `${res.stdout}\n`);
+  }
+  if (res.stderr) {
+    process.stderr.write(res.stderr.endsWith('\n') ? res.stderr : `${res.stderr}\n`);
+  }
+  console.error(`exit code: ${res.exitCode}`);
+  if (res.exitCode !== 0) process.exit(res.exitCode);
+}
+
 export async function main(argv: string[]): Promise<void> {
   const [cmd, ...rest] = argv;
   switch (cmd) {
@@ -303,6 +649,63 @@ export async function main(argv: string[]): Promise<void> {
       if (rest[0] === 'validate') cmdPluginValidate(rest[1]);
       else {
         console.error('unknown plugin subcommand (try: plugin validate <file>)');
+        process.exit(1);
+      }
+      break;
+    case 'routine': {
+      const [sub, ...args] = rest;
+      if (sub === 'add') {
+        try {
+          const parsed = parseRoutineAdd(args);
+          cmdRoutineAdd(parsed.agentId, parsed.cron, parsed.task);
+        } catch (err) {
+          console.error(`Error: ${errText(err)}`);
+          process.exit(1);
+        }
+      } else if (sub === 'list') {
+        cmdRoutineList(args[0]);
+      } else if (sub === 'remove') {
+        if (!args[0]) {
+          console.error('routine remove requires <routine-id>');
+          process.exit(1);
+        }
+        cmdRoutineRemove(args[0]);
+      } else if (sub === 'run') {
+        try {
+          await cmdRoutineRun(parseTickMs(args));
+        } catch (err) {
+          console.error(`Error: ${errText(err)}`);
+          process.exit(1);
+        }
+      } else {
+        console.error('unknown routine subcommand (try: add | list | remove | run)');
+        process.exit(1);
+      }
+      break;
+    }
+    case 'telegram':
+      if (!rest[0]) {
+        console.error('telegram requires <agent-id>');
+        process.exit(1);
+      }
+      await cmdTelegram(rest[0]);
+      break;
+    case 'whatsapp':
+      if (!rest[0]) {
+        console.error('whatsapp requires <agent-id>');
+        process.exit(1);
+      }
+      await cmdWhatsapp(rest[0], rest.slice(1));
+      break;
+    case 'sandbox':
+      if (rest[0] === 'exec') {
+        if (!rest[1] || rest.length < 3) {
+          console.error('sandbox exec requires <agent-id> and "<command>"');
+          process.exit(1);
+        }
+        await cmdSandboxExec(rest[1], rest.slice(2).join(' '));
+      } else {
+        console.error('unknown sandbox subcommand (try: sandbox exec <agent-id> "<command>")');
         process.exit(1);
       }
       break;
