@@ -4,8 +4,12 @@
 // run transcript, and approve/deny pending tool approvals from the browser.
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   RunRecorder,
+  listDocFiles,
+  resolveDocPath,
   type Agent,
   type AgentConfig,
   type AgentRegistry,
@@ -285,6 +289,53 @@ export function createWebServer(opts: WebServerOptions): WebServer {
       return;
     }
 
+    if (method === 'GET' && path === '/api/docs') {
+      const agentId = url.searchParams.get('agentId');
+      if (!agentId) {
+        json(res, 400, { error: 'agentId query param required' });
+        return;
+      }
+      try {
+        opts.registry.get(agentId);
+      } catch {
+        json(res, 404, { error: `unknown agent: ${agentId}` });
+        return;
+      }
+      json(res, 200, { files: listDocFiles(join(opts.agentHome(agentId), 'docs')) });
+      return;
+    }
+
+    if (method === 'GET' && path === '/api/docs/content') {
+      const agentId = url.searchParams.get('agentId');
+      const docPath = url.searchParams.get('path');
+      if (!agentId || !docPath) {
+        json(res, 400, { error: 'agentId and path query params required' });
+        return;
+      }
+      try {
+        opts.registry.get(agentId);
+      } catch {
+        json(res, 404, { error: `unknown agent: ${agentId}` });
+        return;
+      }
+      let abs: string;
+      try {
+        abs = resolveDocPath(join(opts.agentHome(agentId), 'docs'), docPath);
+      } catch (err) {
+        json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+        return;
+      }
+      let content: string;
+      try {
+        content = readFileSync(abs, 'utf8');
+      } catch {
+        json(res, 404, { error: `document not found: ${docPath}` });
+        return;
+      }
+      json(res, 200, { path: docPath, content });
+      return;
+    }
+
     json(res, 404, { error: 'not found' });
   }
 
@@ -364,6 +415,13 @@ input[type=text] { width: 60%; padding: .3rem; }
   <button id="loadRunBtn">Load</button>
 </div>
 <pre id="transcriptPre"></pre>
+
+<h2>Docs</h2>
+<div class="row">
+  <button id="loadDocsBtn">Load docs for selected agent</button>
+</div>
+<div id="docsList"></div>
+<div id="docView" style="border:1px solid #ddd;border-radius:6px;padding:.5rem 1rem;margin-top:.5rem;"></div>
 
 <script>
 // Token passthrough: the server may require ?token= on every route.
@@ -477,6 +535,69 @@ function loadRun() {
       document.getElementById('transcriptPre').textContent = JSON.stringify(d, null, 2);
     });
 }
+// --- Docs tab: minimal markdown renderer (headings, bold, italic, code, lists, links) ---
+function escHtml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+function mdInline(s) {
+  var out = escHtml(s);
+  out = out.replace(/\`([^\`]+)\`/g, '<code>$1</code>');
+  out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  out = out.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+  out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  return out;
+}
+function renderMd(md) {
+  var html = '';
+  var inList = false;
+  var lines = md.split('\n');
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i];
+    var h = /^(#{1,3})\s+(.*)$/.exec(line);
+    var li = /^(\s*)[-*]\s+(.*)$/.exec(line);
+    var ol = /^(\s*)\d+\.\s+(.*)$/.exec(line);
+    if (h) {
+      if (inList) { html += '</ul>'; inList = false; }
+      var lvl = h[1].length;
+      html += '<h' + (lvl + 1) + '>' + mdInline(h[2]) + '</h' + (lvl + 1) + '>';
+    } else if (li || ol) {
+      if (!inList) { html += '<ul>'; inList = true; }
+      html += '<li>' + mdInline((li || ol)[2]) + '</li>';
+    } else if (/^\s*$/.test(line)) {
+      if (inList) { html += '</ul>'; inList = false; }
+    } else {
+      if (inList) { html += '</ul>'; inList = false; }
+      html += '<p>' + mdInline(line) + '</p>';
+    }
+  }
+  if (inList) html += '</ul>';
+  return html;
+}
+function loadDocs() {
+  var agentId = document.getElementById('agentSelect').value;
+  if (!agentId) return;
+  fetch(api('/api/docs?agentId=' + encodeURIComponent(agentId)))
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      var box = document.getElementById('docsList');
+      box.innerHTML = '';
+      (d.files || []).forEach(function (f) {
+        var b = document.createElement('button');
+        b.textContent = f;
+        b.onclick = function () { loadDoc(agentId, f); };
+        box.appendChild(b);
+      });
+      if ((d.files || []).length === 0) box.textContent = 'No documents yet.';
+    });
+}
+function loadDoc(agentId, path) {
+  fetch(api('/api/docs/content?agentId=' + encodeURIComponent(agentId) + '&path=' + encodeURIComponent(path)))
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      document.getElementById('docView').innerHTML = '<h3>' + escHtml(d.path || path) + '</h3>' + renderMd(d.content || '');
+    });
+}
+document.getElementById('loadDocsBtn').onclick = loadDocs;
 document.getElementById('sendBtn').onclick = sendChat;
 document.getElementById('chatInput').addEventListener('keydown', function (e) {
   if (e.key === 'Enter') sendChat();

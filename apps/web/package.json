@@ -1,1 +1,23 @@
-{"dependencies":{"@omni/kernel":"workspace:*"},"description":"Omni web console: zero-dependency node:http + SSE chat UI with approval queue.","engines":{"node":">=22"},"exports":{".":{"default":"./dist/src/index.js","types":"./dist/src/index.d.ts"}},"files":["dist"],"main":"./dist/src/index.js","name":"@omni/web","type":"module","types":"./dist/src/index.d.ts","version":"0.4.0"}
+{
+  "dependencies": {
+    "@omni/kernel": "workspace:*"
+  },
+  "description": "Omni web console: zero-dependency node:http + SSE chat UI with approval queue.",
+  "engines": {
+    "node": ">=22"
+  },
+  "exports": {
+    ".": {
+      "default": "./dist/src/index.js",
+      "types": "./dist/src/index.d.ts"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "main": "./dist/src/index.js",
+  "name": "@omni/web",
+  "type": "module",
+  "types": "./dist/src/index.d.ts",
+  "version": "1.1.0"
+}

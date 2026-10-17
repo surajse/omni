@@ -9,3 +9,5 @@ export * from './transcript.js';
 export * from './handoff.js';
 export * from './secrets.js';
 export * from './pack.js';
+export * from './docs.js';
+export * from './group.js';

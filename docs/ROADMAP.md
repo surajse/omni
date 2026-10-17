@@ -84,8 +84,33 @@
   `docs/INSTALL.md` + `docs/PUBLISH.md`; CLI published as `omni-agents`
   (name verified free 2026-10-17); `CHANGELOG.md`; everything at `1.0.0`
 
-## What's next (post-1.0)
+## v1.1 — "Better Than All": the experience layer (this release)
 
+The closed giants win on experience, not architecture. v1.1 closes the four
+experience gaps — each a direct answer to a rival's best weapon:
+
+- **Watchers** (`@omni/watchers`): proactive observation — watch a URL, file,
+  or command output on a cron; on change (hash diff + cooldown), the agent
+  runs your task with the excerpt. First fetch is the baseline (no false
+  positives). `omni watch add/list/remove/check/run`. Docs: WATCHERS.md.
+  (Answers Dots' "proactive research".)
+- **Docs/Spaces**: every agent gets a `docs/` workspace with `doc.write`,
+  `doc.read`, `doc.list`, `doc.append` tools (policy-gated, path-traversal
+  jailed); the web console gains a Docs tab with list + markdown rendering.
+  (Answers OpenDots Spaces.)
+- **Specialist packs** (`@omni/packs` + `packs/`): one-command expert agents —
+  `researcher`, `inbox-triage`, `repo-watcher`, `meeting-prep` — each a
+  validated `pack.json` (system prompt, tools, policy, skills, routines) with
+  an honest `requires` setup checklist. `omni pack list/install`. Docs: PACKS.md.
+  (Answers Dots' specialist dots.)
+- **Group chat** (kernel `GroupStore` + `runGroupTurn`): multi-agent rooms —
+  round-robin turns, `@mention` routing, `/done` early exit, `maxRounds`
+  guard, per-agent policies never bypassed, JSONL history. `omni group
+  create/list/chat`. Docs: GROUPS.md. (Answers Grok Bot group chats.)
+
+## What's next (post-1.1)
+
+- Voice channel (pluggable STT/TTS), X adapter (post/reply/mention-watch)
 - Hosted relay: share agents without self-hosting (same policy engine + audit log)
 - Mobile app (the agent in your pocket, on your server)
 - Marketplace curation: signed plugin manifests, review queue, usage/cost tracking

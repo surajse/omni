@@ -2,6 +2,29 @@
 
 All notable changes to Omni. Format: Keep a Changelog.
 
+## [1.1.0] — 2026-10-17
+
+**"Better Than All": the experience layer.**
+
+### Added
+- Watchers (`@omni/watchers`): proactive observation of URLs, files, and
+  command output on a cron; hash-diff + cooldown-gated change detection;
+  first fetch stores the baseline (no false positives); `omni watch
+  add/list/remove/check/run`; daemon auto-skips approvals like the routine
+  daemon. Docs: WATCHERS.md.
+- Docs/Spaces: per-agent `docs/` workspace with `doc.write/read/list/append`
+  tools (write-class tools policy-gated, all paths jailed against traversal);
+  web console Docs tab (list + markdown rendering). Wired into every agent
+  stack: CLI, handoff sub-agents, and web.
+- Specialist packs (`@omni/packs` + `packs/`): `researcher`, `inbox-triage`,
+  `repo-watcher`, `meeting-prep` — validated `pack.json` format (system
+  prompt, tools, policy, skills, routines) with honest `requires` checklists;
+  `omni pack list/install [--as]`; `OMNI_PACKS_DIR` override. Docs: PACKS.md.
+- Group chat (kernel): `GroupStore` (filesystem-backed rooms + JSONL
+  history), `runGroupTurn` (round-robin + `@mention` routing, `/done` early
+  exit, `maxRounds` guard, per-agent policies intact); `omni group
+  create/list/chat`. Docs: GROUPS.md.
+
 ## [1.0.0] — 2026-10-17
 
 **Hardened, semantic, installable.**

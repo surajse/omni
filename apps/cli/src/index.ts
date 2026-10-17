@@ -10,11 +10,14 @@ import { randomUUID } from 'node:crypto';
 import {
   Agent,
   AgentRegistry,
+  GroupStore,
   MockProvider,
   OpenAICompatibleProvider,
   packAgent,
   PolicyEngine,
+  registerDocTools,
   RunRecorder,
+  runGroupTurn,
   ToolGateway,
   registerHandoffTool,
   unpackAgent,
@@ -30,10 +33,13 @@ import { DockerRuntime, registerComputerTools } from '@omni/sandbox';
 import type { ContainerRuntime } from '@omni/sandbox';
 import { TelegramChannel } from '@omni/channels-telegram';
 import { WhatsAppCloudChannel } from '@omni/channels-whatsapp';
-import { RoutineStore, Scheduler, validateCron } from '@omni/scheduler';
+import { RoutineStore, Scheduler, matchesCron, validateCron } from '@omni/scheduler';
 import type { Routine } from '@omni/scheduler';
 import { RegistryManager } from '@omni/registry';
 import { TeamManager } from '@omni/teams';
+import { PackManager, resolvePacksDir } from '@omni/packs';
+import { WatchStore, checkWatch, formatWatchTarget, parseWatchTarget } from '@omni/watchers';
+import type { Watch } from '@omni/watchers';
 
 export function slugify(name: string): string {
   return (
@@ -144,6 +150,11 @@ function buildGateway(home: string): { gateway: ToolGateway; memory: SqliteMemor
   return { gateway, memory };
 }
 
+/** Docs directory for an agent (its document workspace). */
+function agentDocsDir(home: string, agentId: string): string {
+  return join(agentHomeDir(home, agentId), 'docs');
+}
+
 /** Append the agent's learned skills to its system prompt (no-op when none). */
 function withSkillPrompt(config: AgentConfig, agentDir: string): AgentConfig {
   const fragment = new SkillManager(join(agentDir, 'skills')).promptFragment();
@@ -205,6 +216,7 @@ export async function buildSubAgentWiring(
 ): Promise<HandoffMade> {
   const gateway = new ToolGateway();
   registerStandardTools(gateway, memory);
+  registerDocTools(gateway, agentDocsDir(home, target.id));
   if (opts.withSandbox) {
     await maybeAttachSandbox(gateway, target.id, { quiet: true, runtime: opts.runtime });
   }
@@ -227,6 +239,7 @@ async function createAgentStack(
   opts: { approve: ApprovalHandler; onEvent?: (e: RunEvent) => void; withSandbox: boolean },
 ): Promise<AgentStack> {
   const { gateway, memory } = buildGateway(home);
+  registerDocTools(gateway, agentDocsDir(home, config.id));
   if (opts.withSandbox) {
     await maybeAttachSandbox(gateway, config.id);
   }
@@ -371,7 +384,7 @@ async function askApproval(question: string): Promise<boolean> {
 }
 
 function usage(): string {
-  return `omni — universal agent platform (v0.4)
+  return `omni — universal agent platform (v1.1)
 
 Usage:
   omni init --name <Name>                 Create a new agent (stored in ~/.omni/agents)
@@ -379,7 +392,7 @@ Usage:
   omni chat <id>                          Interactive chat with an agent (/quit to exit)
   omni run <id> "<task>"                  Run a single task and print the result
   omni learn <id> <skill> "<description>" Learn a skill from the agent's last run
-  omni web [--port N]                     Web console with live events + approval queue
+  omni web [--port N]                     Web console with live events + approval queue + docs
   omni doctor                             Environment diagnostics (names of env vars only)
   omni plugin validate <file>             Validate an .omni-plugin.json manifest
   omni plugin search <query>              Search registry sources for plugins
@@ -389,6 +402,8 @@ Usage:
   omni plugin source add <n> <loc>        Add a registry source (dir or git URL)
   omni plugin source list                 List registry sources
   omni plugin source remove <n>           Remove a registry source
+  omni pack list                          List specialist packs (researcher, inbox-triage, …)
+  omni pack install <name> [--as <id>]    Install a specialist pack as an agent
   omni agent export <id> [--out <file>]   Export an agent as an .omnipack.json pack
   omni agent import <file> [--as <id>]    Import an agent pack
   omni team init <name>                   Create a team (shared directory)
@@ -396,6 +411,15 @@ Usage:
   omni team install <t> <id> [--as <n>]   Install a team agent
   omni team list                          List teams
   omni team agents <t>                    List a team's published agents
+  omni group create <n> <id> <id> [...]   Create a multi-agent group chat room
+  omni group list                         List group rooms
+  omni group chat <name>                  Chat with a group (/quit to exit)
+  omni watch add <id> <target> --every "<cron>" --task "<task>" [--cooldown <mins>]
+                                          Watch a url:/file:/cmd: target for changes
+  omni watch list [id]                    List watches
+  omni watch remove <watch-id>            Remove a watch
+  omni watch check <watch-id>             Check one watch now (prints changed/unchanged)
+  omni watch run [--tick-ms N]            Run the watch daemon (approvals auto-skip)
   omni routine add <id> "<cron>" "<task>" Add a scheduled routine (5-field cron)
   omni routine list [id]                  List routines
   omni routine remove <routine-id>         Remove a routine
@@ -412,6 +436,7 @@ Environment:
   OMNI_WEB_PORT           Web console port (default: 8080; --port overrides)
   OMNI_WEB_TOKEN          Optional token guarding the web console (?token= required)
   OMNI_TEAMS_ROOT         Teams directory (default: ~/.omni/teams; point at a shared folder)
+  OMNI_PACKS_DIR            Specialist packs directory (default: the repo's packs/)
   TELEGRAM_BOT_TOKEN      Telegram bot token from @BotFather
   TELEGRAM_ALLOWED_USERS  Comma-separated Telegram user ids allowed to chat (default: all)
   WHATSAPP_TOKEN          WhatsApp Cloud API access token
@@ -802,6 +827,7 @@ async function cmdWeb(portOpt: number | undefined): Promise<void> {
     makeAgent: (config, hooks) => {
       const gateway = new ToolGateway();
       registerStandardTools(gateway, memory);
+      registerDocTools(gateway, join(agentHomeDir(home, config.id), 'docs'));
       registerHandoffTool(gateway, {
         registry,
         makeDeps: (target) =>
@@ -1129,6 +1155,335 @@ function cmdTeamAgents(team: string | undefined): void {
 
 // ---------- doctor ----------
 
+/** Parse `watch add` args; throws on bad input (pure — tested). */
+export function parseWatchAdd(rest: string[]): {
+  agentId: string;
+  target: string;
+  every: string;
+  task: string;
+  cooldownMinutes: number;
+} {
+  const [agentId, target, ...flagArgs] = rest;
+  if (!agentId || !target) {
+    throw new Error('usage: omni watch add <agent-id> <url:...|file:...|cmd:...> --every "<cron>" --task "<task>" [--cooldown <mins>]');
+  }
+  const flag = (name: string): string | undefined => {
+    const i = flagArgs.indexOf(name);
+    return i >= 0 ? flagArgs[i + 1] : undefined;
+  };
+  const every = flag('--every');
+  const task = flag('--task');
+  if (!every || !task) {
+    throw new Error('watch add requires --every "<cron>" and --task "<task>"');
+  }
+  validateCron(every);
+  parseWatchTarget(target); // throws on bad spec
+  const cooldownRaw = flag('--cooldown');
+  const cooldownMinutes = cooldownRaw === undefined ? 60 : Number(cooldownRaw);
+  if (!Number.isFinite(cooldownMinutes) || cooldownMinutes < 0) {
+    throw new Error('--cooldown must be a non-negative number of minutes');
+  }
+  return { agentId, target, every, task, cooldownMinutes };
+}
+
+function findWatch(home: string, watchId: string): { dir: string; watch: Watch } {
+  for (const dir of eachAgentHome(home)) {
+    const store = new WatchStore(dir);
+    try {
+      return { dir, watch: store.get(watchId) };
+    } catch {
+      // try the next agent home
+    }
+  }
+  throw new Error(`watch not found: ${watchId}`);
+}
+
+function cmdWatchAdd(agentId: string, targetSpec: string, rest: string[]): void {
+  let parsed;
+  try {
+    parsed = parseWatchAdd([agentId, targetSpec, ...rest]);
+  } catch (err) {
+    console.error(`Error: ${errText(err)}`);
+    process.exit(1);
+  }
+  const home = omniHome();
+  getAgentConfig(home, parsed.agentId); // throws if the agent does not exist
+  const watch = new WatchStore(agentHomeDir(home, parsed.agentId)).add({
+    agentId: parsed.agentId,
+    target: parseWatchTarget(parsed.target),
+    every: parsed.every,
+    task: parsed.task,
+    cooldownMinutes: parsed.cooldownMinutes,
+  });
+  console.log(
+    `Added watch ${watch.id} for agent "${parsed.agentId}": ${formatWatchTarget(watch.target)} every ${watch.every}`,
+  );
+}
+
+function cmdWatchList(agentId: string | undefined): void {
+  const home = omniHome();
+  const homes = agentId ? [agentHomeDir(home, agentId)] : eachAgentHome(home);
+  let count = 0;
+  for (const dir of homes) {
+    for (const w of new WatchStore(dir).list()) {
+      if (agentId && w.agentId !== agentId) continue;
+      console.log(`${w.id}\t${w.agentId}\t${formatWatchTarget(w.target)}\t${w.every}\tcool ${w.cooldownMinutes}m`);
+      count++;
+    }
+  }
+  if (count === 0) {
+    console.log('No watches. Add one with: omni watch add <agent-id> <url:...|file:...|cmd:...> --every "<cron>" --task "<task>"');
+  }
+}
+
+function cmdWatchRemove(watchId: string): void {
+  const home = omniHome();
+  try {
+    const { dir } = findWatch(home, watchId);
+    new WatchStore(dir).remove(watchId);
+    console.log(`Removed watch ${watchId}`);
+  } catch (err) {
+    console.error(`Error: ${errText(err)}`);
+    process.exit(1);
+  }
+}
+
+async function cmdWatchCheck(watchId: string): Promise<void> {
+  const home = omniHome();
+  let found;
+  try {
+    found = findWatch(home, watchId);
+  } catch (err) {
+    console.error(`Error: ${errText(err)}`);
+    process.exit(1);
+  }
+  const store = new WatchStore(found.dir);
+  try {
+    const res = await checkWatch(store, found.watch);
+    console.log(res.changed ? 'CHANGED' : 'unchanged');
+    if (res.excerpt) console.log(`excerpt: ${res.excerpt}`);
+  } catch (err) {
+    console.error(`Error: ${errText(err)}`);
+    process.exit(1);
+  }
+}
+
+async function dispatchWatch(home: string, watch: Watch): Promise<void> {
+  const store = new WatchStore(agentHomeDir(home, watch.agentId));
+  let res;
+  try {
+    res = await checkWatch(store, watch);
+  } catch (err) {
+    console.error(`[watch ${watch.id}] fetch failed: ${errText(err)}`);
+    return;
+  }
+  if (!res.changed) return;
+  console.log(`[watch ${watch.id}] change detected on ${formatWatchTarget(watch.target)}`);
+  const config = getAgentConfig(home, watch.agentId);
+  const task = `${watch.task}\n\nObserved change (${formatWatchTarget(watch.target)}):\n${res.excerpt ?? ''}`;
+  const { agent, memory } = await createAgentStack(home, config, {
+    approve: async (req) => {
+      console.log(`[watch ${watch.id}] auto-skipped approval for "${req.tool}"`);
+      return false;
+    },
+    onEvent: progressEvents(),
+    withSandbox: true,
+  });
+  try {
+    const out = await agent.run(task);
+    console.log(`[watch ${watch.id}] done: ${(out || '(no reply)').slice(0, 500)}`);
+  } finally {
+    memory.close();
+  }
+}
+
+async function cmdWatchRun(tickMs: number): Promise<void> {
+  const home = omniHome();
+  const watches: Watch[] = [];
+  for (const dir of eachAgentHome(home)) {
+    for (const w of new WatchStore(dir).list()) watches.push(w);
+  }
+  if (watches.length === 0) {
+    console.log('No watches defined. Add one with: omni watch add <agent-id> <target> --every "<cron>" --task "<task>"');
+    return;
+  }
+  console.log(`Watch daemon started (${watches.length} watch(es), tick ${tickMs}ms). Ctrl+C to stop.`);
+  console.log('Note: in daemon mode write-class tools are auto-SKIPPED (no interactive approvals).');
+  const lastFired = new Map<string, string>();
+  const minuteKey = (d: Date): string =>
+    `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}-${d.getHours()}-${d.getMinutes()}`;
+  const tick = async (): Promise<void> => {
+    const key = minuteKey(new Date());
+    for (const w of watches) {
+      try {
+        if (!matchesCron(w.every, new Date())) continue;
+      } catch {
+        continue;
+      }
+      if (lastFired.get(w.id) === key) continue;
+      lastFired.set(w.id, key);
+      await dispatchWatch(home, w);
+    }
+  };
+  const timer = setInterval(() => {
+    void tick().catch((err: unknown) => console.error(`watch tick failed: ${errText(err)}`));
+  }, tickMs);
+  void tick();
+  const shutdown = (): void => {
+    clearInterval(timer);
+    console.log('\nWatch daemon stopped.');
+    process.exit(0);
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+  await new Promise<never>(() => {
+    // run until a signal arrives
+  });
+}
+
+// ---------- specialist pack commands ----------
+
+function cmdPackList(): void {
+  let dir: string;
+  try {
+    dir = resolvePacksDir();
+  } catch (err) {
+    console.error(`Error: ${errText(err)}`);
+    process.exit(1);
+  }
+  const packs = new PackManager().listPacks(dir);
+  if (packs.length === 0) {
+    console.log('No packs found.');
+    return;
+  }
+  for (const p of packs) {
+    console.log(`${p.name}\tv${p.version} — ${p.description}`);
+  }
+}
+
+function cmdPackInstall(name: string | undefined, rest: string[]): void {
+  if (!name) {
+    console.error('usage: omni pack install <name> [--as <id>]');
+    process.exit(1);
+  }
+  let asId: string | undefined;
+  try {
+    asId = parseAsId(rest);
+  } catch (err) {
+    console.error(`Error: ${errText(err)}`);
+    process.exit(1);
+  }
+  let dir: string;
+  try {
+    dir = resolvePacksDir();
+  } catch (err) {
+    console.error(`Error: ${errText(err)}`);
+    process.exit(1);
+  }
+  const home = omniHome();
+  try {
+    const res = new PackManager().installPack(home, dir, name, asId);
+    console.log(`Installed pack "${name}" as agent "${res.agentId}" (${res.skills} skill(s), ${res.routines} routine(s)).`);
+    if (res.requires.length > 0) {
+      console.log('Setup checklist:');
+      for (const r of res.requires) console.log(`  - ${r}`);
+    }
+  } catch (err) {
+    console.error(`Error: ${errText(err)}`);
+    process.exit(1);
+  }
+}
+
+// ---------- group chat commands ----------
+
+function cmdGroupCreate(name: string | undefined, members: string[]): void {
+  if (!name || members.length < 2) {
+    console.error('usage: omni group create <name> <agent-id> <agent-id> [more...]');
+    process.exit(1);
+  }
+  const home = omniHome();
+  const registry = new AgentRegistry(join(home, 'agents'));
+  for (const id of members) {
+    try {
+      registry.get(id);
+    } catch {
+      console.error(`unknown agent: ${id}`);
+      process.exit(1);
+    }
+  }
+  try {
+    new GroupStore(home).create(name, members);
+    console.log(`Created group "${name}" with members: ${members.join(', ')}`);
+  } catch (err) {
+    console.error(`Error: ${errText(err)}`);
+    process.exit(1);
+  }
+}
+
+function cmdGroupList(): void {
+  const groups = new GroupStore(omniHome()).list();
+  if (groups.length === 0) {
+    console.log('No groups yet. Create one with: omni group create <name> <agent-id> <agent-id>');
+    return;
+  }
+  for (const g of groups) {
+    console.log(`${g.name}\t${g.members.join(', ')}\t(max ${g.maxRounds} rounds)`);
+  }
+}
+
+async function cmdGroupChat(name: string): Promise<void> {
+  const home = omniHome();
+  const store = new GroupStore(home);
+  let session;
+  try {
+    session = store.get(name);
+  } catch (err) {
+    console.error(`Error: ${errText(err)}`);
+    process.exit(1);
+  }
+  const registry = new AgentRegistry(join(home, 'agents'));
+  console.log(`Group "${name}" [${session.members.join(', ')}]. Type a message; /quit to exit.`);
+  const rl = createInterface({ input, output });
+  try {
+    for (;;) {
+      const text = (await rl.question('you> ')).trim();
+      if (!text) continue;
+      if (text === '/quit') break;
+      const { memory } = buildGateway(home);
+      try {
+        const turns = await runGroupTurn(
+          store,
+          session,
+          text,
+          {
+            getConfig: (id) => registry.get(id),
+            makeDeps: (target) =>
+              buildSubAgentWiring(home, memory, target, {
+                approve: (req) => askApproval(`[${target.id}] Allow tool "${req.tool}"?`),
+                onEvent: (e) => {
+                  if (e.type === 'tool-call') output.write(`… calling ${e.call.name}\n`);
+                },
+                withSandbox: true,
+              }),
+          },
+          { maxSteps: 8 },
+        );
+        for (const t of turns) {
+          output.write(`\n${t.member}> ${t.output || '(no reply)'}\n`);
+        }
+      } catch (err) {
+        output.write(`Error: ${friendlyError(err)}\n`);
+      } finally {
+        memory.close();
+      }
+    }
+  } finally {
+    rl.close();
+  }
+}
+
+// ---------- doctor ----------
+
 function checkCommand(cmd: string, args: string[]): boolean {
   try {
     execFileSync(cmd, args, { stdio: 'ignore' });
@@ -1268,6 +1623,67 @@ export async function main(argv: string[]): Promise<void> {
     case 'doctor':
       cmdDoctor();
       break;
+    case 'watch': {
+      const [sub, ...args] = rest;
+      if (sub === 'add') {
+        if (!args[0] || !args[1]) {
+          console.error('usage: omni watch add <agent-id> <url:...|file:...|cmd:...> --every "<cron>" --task "<task>" [--cooldown <mins>]');
+          process.exit(1);
+        }
+        cmdWatchAdd(args[0], args[1], args.slice(2));
+      } else if (sub === 'list') {
+        cmdWatchList(args[0]);
+      } else if (sub === 'remove') {
+        if (!args[0]) {
+          console.error('watch remove requires <watch-id>');
+          process.exit(1);
+        }
+        cmdWatchRemove(args[0]);
+      } else if (sub === 'check') {
+        if (!args[0]) {
+          console.error('watch check requires <watch-id>');
+          process.exit(1);
+        }
+        await cmdWatchCheck(args[0]);
+      } else if (sub === 'run') {
+        try {
+          await cmdWatchRun(parseTickMs(args));
+        } catch (err) {
+          console.error(`Error: ${errText(err)}`);
+          process.exit(1);
+        }
+      } else {
+        console.error('unknown watch subcommand (try: add | list | remove | check | run)');
+        process.exit(1);
+      }
+      break;
+    }
+    case 'pack': {
+      const [sub, ...args] = rest;
+      if (sub === 'list') cmdPackList();
+      else if (sub === 'install') cmdPackInstall(args[0], args.slice(1));
+      else {
+        console.error('unknown pack subcommand (try: list | install)');
+        process.exit(1);
+      }
+      break;
+    }
+    case 'group': {
+      const [sub, ...args] = rest;
+      if (sub === 'create') cmdGroupCreate(args[0], args.slice(1));
+      else if (sub === 'list') cmdGroupList();
+      else if (sub === 'chat') {
+        if (!args[0]) {
+          console.error('group chat requires <name>');
+          process.exit(1);
+        }
+        await cmdGroupChat(args[0]);
+      } else {
+        console.error('unknown group subcommand (try: create | list | chat)');
+        process.exit(1);
+      }
+      break;
+    }
     case 'routine': {
       const [sub, ...args] = rest;
       if (sub === 'add') {

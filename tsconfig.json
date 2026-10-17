@@ -43,6 +43,12 @@
     },
     {
       "path": "packages/teams"
+    },
+    {
+      "path": "packages/watchers"
+    },
+    {
+      "path": "packages/packs"
     }
   ]
 }

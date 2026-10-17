@@ -5,10 +5,11 @@
 Omni is an open-source platform for agents that work everywhere: a
 provider-agnostic agent kernel with explicit allow/ask/deny tool policies,
 MCP tool servers, per-agent Docker computers, persistent + vector memory,
-skills learned from demonstration, agent-to-agent handoff, a plugin
-registry (including a real `.grok-plugin` importer), and channels spanning
-console, web, Telegram, and WhatsApp. No vendor lock-in, no mandatory
-cloud, no subscription meter.
+skills learned from demonstration, agent-to-agent handoff, group chat rooms,
+proactive watchers, per-agent document workspaces, one-command specialist
+packs, a plugin registry (including a real `.grok-plugin` importer), and
+channels spanning console, web, Telegram, and WhatsApp. No vendor lock-in,
+no mandatory cloud, no subscription meter.
 
 ## Install
 
@@ -58,6 +59,7 @@ pnpm exec omni run friday "remember that my favorite color is blue, then tell me
 | `OMNI_WEB_PORT` | Web console port (default `8080`; `omni web --port` overrides) |
 | `OMNI_WEB_TOKEN` | Optional web console token — when set, every `/` and `/api/*` request needs `?token=` (set one if you bind wider than localhost) |
 | `OMNI_TEAMS_ROOT` | Teams root dir (default `~/.omni/teams`); point at a shared git repo / synced folder |
+| `OMNI_PACKS_DIR` | Specialist packs dir (default: the repo's `packs/`) |
 
 Without `OMNI_API_KEY` the CLI uses a scripted mock provider (useful for
 demos and tests). Copy `.env.example` to `.env` for local use — never commit
@@ -148,10 +150,34 @@ omni telegram friday
 
 See [docs/SANDBOX.md](docs/SANDBOX.md) (threat model), [CHANGELOG.md](CHANGELOG.md).
 
+## v1.1: "Better Than All" — watchers, docs, packs, group chat
+
+```sh
+# Watchers: proactive observation — agent acts only when something changes
+omni watch add friday "url:https://example.com/product" --every "*/15 * * * *" \
+  --task "Summarize what changed and tell me if the price moved." --cooldown 120
+omni watch check <watch-id>   # one-shot: CHANGED/unchanged + excerpt
+omni watch run                # daemon mode
+
+# Docs: every agent gets a document workspace (also in the web console's Docs tab)
+omni run friday "research vector databases and save the brief with doc.write"
+
+# Specialist packs: one-command expert agents
+omni pack list
+omni pack install researcher --as scout
+
+# Group chat: multiple agents, one room (@mentions route turns, /done ends)
+omni group create launch-team scout writer
+omni group chat launch-team
+```
+
+See [docs/WATCHERS.md](docs/WATCHERS.md), [docs/PACKS.md](docs/PACKS.md),
+[docs/GROUPS.md](docs/GROUPS.md).
+
 ## Repository layout
 
 ```
-packages/kernel/            Agent loop, providers, tool gateway, policy engine, MCP sources, registry, handoff, packs
+packages/kernel/            Agent loop, providers, tool gateway, policy engine, MCP sources, registry, handoff, packs, docs tools, group chat
 packages/memory/            SQLite key/value + vector memory (embeddings client, cosine)
 packages/plugin-spec/       Plugin manifest schema + validator (+ example)
 packages/channels/          Channel abstraction + console channel
@@ -163,8 +189,11 @@ packages/skills/            Learn skills from transcripts, manage them, inject i
 packages/registry/          Plugin registry: sources, search, one-command installs
 packages/importers/         .grok-plugin → .omni-plugin importer (real format)
 packages/teams/             Filesystem team sharing for agent packs
+packages/watchers/          Proactive observation: fetch targets on cron, diff, notify on change
+packages/packs/             Specialist packs: one-command expert agents (researcher, inbox-triage, …)
+packs/                      The four flagship pack definitions
 apps/cli/                   `omni` command-line interface (npm: omni-agents)
-apps/web/                   Web console: node:http + SSE chat UI with approval queue
+apps/web/                   Web console: node:http + SSE chat UI with approval queue + docs tab
 docs/                       Architecture, install, publish, plugin spec, security, roadmap, …
 install.sh                  One-command installer (Linux/macOS, no sudo)
 ```

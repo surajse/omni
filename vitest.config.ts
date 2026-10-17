@@ -22,6 +22,8 @@ export default defineConfig({
       '@omni/teams': src('teams'),
       '@omni/registry': src('registry'),
       '@omni/importers': src('importers'),
+      '@omni/watchers': src('watchers'),
+      '@omni/packs': src('packs'),
     },
   },
   test: {
