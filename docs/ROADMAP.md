@@ -24,16 +24,26 @@
 - Docs: CHANNELS.md, SANDBOX.md (incl. honest Docker-not-exercised-here note)
 - `omni` CLI: routine, telegram, whatsapp, sandbox exec
 
-## v0.3 — Trust hardening + teams
+## v0.3 — Skills, handoffs, web console (this release)
+
+- `@omni/skills`: learn reusable skills from run transcripts (`omni learn`),
+  `SkillManager` (`SKILL.md` + `skill.json`), deterministic step compression
+  (3+ repeats collapse), prompt injection of learned skills
+- Run transcripts: every `omni run` and web run saves JSONL to
+  `~/.omni/agents/<id>/runs/` (also the input to `omni learn`)
+- Agent-to-agent handoff: `agent.handoff` tool (write-class, policy-gated),
+  depth-limited chains (default max 3), clean errors for unknown targets
+- Web console (`@omni/web`, zero deps): `omni web` — chat with SSE live
+  events, transcript viewer, and an Approve/Deny approval queue;
+  binds 127.0.0.1 only, no auth by design (see docs/WEB.md)
+- Docs: SKILLS.md, WEB.md
+
+## v0.4 — Trust hardening + distribution
 
 - Sandbox hardening: per-agent egress network policy, image digest pinning by default
-- Approvals over the channel (approve/deny buttons in Telegram/WhatsApp, not just console)
+- Approvals over the channel (approve/deny buttons in Telegram/WhatsApp, not just console/web)
 - Plugin loader in the CLI (install from manifest, `mcp-stdio` supervision)
 - Memory: semantic recall (sqlite-vec, still local), per-agent export/import commands
-- Multi-agent: sub-agents, handoffs, shared task state
-
-## v0.4 — Distribution
-
 - `.omni-plugin` registry (git-based index)
 - `.grok-plugin` importer (install rivals' plugins into Omni agents)
 - OpenDots dot importer

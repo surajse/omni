@@ -45,6 +45,7 @@ Once built, the CLI is also available as `pnpm exec omni …`.
 | `WHATSAPP_PHONE_NUMBER_ID` | WhatsApp Business phone number id            |
 | `WHATSAPP_VERIFY_TOKEN` | Webhook verify token (your choice)             |
 | `WHATSAPP_PORT` | Webhook listen port (default `3000`)                 |
+| `OMNI_WEB_PORT` | Web console port (default `8080`; `omni web --port` overrides) |
 
 Without `OMNI_API_KEY` the CLI uses a scripted mock provider (useful for
 demos and tests). Copy `.env.example` to `.env` for local use — never commit
@@ -69,6 +70,24 @@ omni whatsapp friday --port 3000
 See [docs/CHANNELS.md](docs/CHANNELS.md) (BotFather + WhatsApp setup) and
 [docs/SANDBOX.md](docs/SANDBOX.md) (Docker model + security notes).
 
+## v0.3: skills, handoffs, web console
+
+```sh
+# Learn a skill from the agent's last run — it becomes part of its prompt
+omni run friday "list unread messages and archive the newsletters"
+omni learn friday triage-inbox "Triage the inbox: list unread, archive newsletters"
+
+# Agents can delegate: add agent.handoff to a specialist's tools, then
+omni run friday "hand the research task to scout"
+
+# Web console: chat with live events, transcripts, and an approval queue
+omni web                  # http://127.0.0.1:8080 (local-only, no auth)
+```
+
+Every `omni run` now saves its transcript to `~/.omni/agents/<id>/runs/`
+(the input to `omni learn`). See [docs/SKILLS.md](docs/SKILLS.md) and
+[docs/WEB.md](docs/WEB.md).
+
 ## Repository layout
 
 ```
@@ -80,8 +99,10 @@ packages/sandbox/           Per-agent Docker computers + computer-use tools
 packages/channels-telegram/ Telegram Bot API channel (long-polling)
 packages/channels-whatsapp/ WhatsApp Cloud API channel (webhook server)
 packages/scheduler/         Cron matcher, routine store, ticking scheduler
+packages/skills/            Learn skills from transcripts, manage them, inject into prompts
 apps/cli/                   `omni` command-line interface
-docs/                       Architecture, plugin spec, security model, roadmap, channels, sandbox
+apps/web/                   Web console: node:http + SSE chat UI with approval queue
+docs/                       Architecture, plugin spec, security model, roadmap, channels, sandbox, skills, web
 ```
 
 ## Design principles

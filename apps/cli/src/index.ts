@@ -1,19 +1,25 @@
 #!/usr/bin/env node
 // Omni CLI: init / list / chat / run / plugin validate.
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { mkdirSync, readFileSync, readdirSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
+import { randomUUID } from 'node:crypto';
 import {
   Agent,
   AgentRegistry,
   MockProvider,
   OpenAICompatibleProvider,
   PolicyEngine,
+  RunRecorder,
   ToolGateway,
+  registerHandoffTool,
 } from '@omni/kernel';
 import type { AgentConfig, ApprovalHandler, ModelProvider, RunEvent } from '@omni/kernel';
+import { SkillManager, learnSkillFromTranscript } from '@omni/skills';
+import type { Skill } from '@omni/skills';
+import { createWebServer } from '@omni/web';
 import { SqliteMemoryStore } from '@omni/memory';
 import { validateManifest } from '@omni/plugin-spec';
 import { ConsoleChannel } from '@omni/channels';
@@ -71,10 +77,8 @@ function buildProvider(): ModelProvider {
   return new MockProvider([]);
 }
 
-function buildGateway(home: string): { gateway: ToolGateway; memory: SqliteMemoryStore } {
-  const gateway = new ToolGateway();
-  const memory = new SqliteMemoryStore(join(home, 'memory.db'));
-
+/** Register the standard in-process tools on a gateway (shared by CLI and web). */
+function registerStandardTools(gateway: ToolGateway, memory: SqliteMemoryStore): void {
   gateway.register(
     {
       name: 'get_time',
@@ -125,8 +129,20 @@ function buildGateway(home: string): { gateway: ToolGateway; memory: SqliteMemor
       return `remembered "${key}" in namespace "${namespace}"`;
     },
   );
+}
 
+function buildGateway(home: string): { gateway: ToolGateway; memory: SqliteMemoryStore } {
+  const gateway = new ToolGateway();
+  const memory = new SqliteMemoryStore(join(home, 'memory.db'));
+  registerStandardTools(gateway, memory);
   return { gateway, memory };
+}
+
+/** Append the agent's learned skills to its system prompt (no-op when none). */
+function withSkillPrompt(config: AgentConfig, agentDir: string): AgentConfig {
+  const fragment = new SkillManager(join(agentDir, 'skills')).promptFragment();
+  if (!fragment) return config;
+  return { ...config, systemPrompt: `${config.systemPrompt}\n\n${fragment}` };
 }
 
 function agentHomeDir(home: string, agentId: string): string {
@@ -171,7 +187,24 @@ async function createAgentStack(
   if (opts.withSandbox) {
     await maybeAttachSandbox(gateway, config.id);
   }
-  const agent = new Agent(config, {
+  const registry = new AgentRegistry(join(home, 'agents'));
+  registerHandoffTool(gateway, {
+    registry,
+    makeDeps: (target) => {
+      const subGateway = new ToolGateway();
+      registerStandardTools(subGateway, memory);
+      return {
+        provider: buildProvider(),
+        gateway: subGateway,
+        policy: new PolicyEngine(target.policy),
+        approve: opts.approve,
+        memory,
+        onEvent: opts.onEvent,
+      };
+    },
+  });
+  const effective = withSkillPrompt(config, agentHomeDir(home, config.id));
+  const agent = new Agent(effective, {
     provider: buildProvider(),
     gateway,
     policy: new PolicyEngine(config.policy),
@@ -252,13 +285,15 @@ async function askApproval(question: string): Promise<boolean> {
 }
 
 function usage(): string {
-  return `omni — universal agent platform (v0.2)
+  return `omni — universal agent platform (v0.3)
 
 Usage:
   omni init --name <Name>                 Create a new agent (stored in ~/.omni/agents)
   omni list                               List agents
   omni chat <id>                          Interactive chat with an agent (/quit to exit)
   omni run <id> "<task>"                  Run a single task and print the result
+  omni learn <id> <skill> "<description>" Learn a skill from the agent's last run
+  omni web [--port N]                     Web console with live events + approval queue
   omni plugin validate <file>             Validate an .omni-plugin.json manifest
   omni routine add <id> "<cron>" "<task>" Add a scheduled routine (5-field cron)
   omni routine list [id]                  List routines
@@ -273,6 +308,7 @@ Environment:
   OMNI_BASE_URL           Base URL for the OpenAI-compatible endpoint (default: https://api.openai.com/v1)
   OMNI_MODEL              Model name (default: gpt-4o-mini)
   OMNI_SANDBOX_IMAGE      Docker image for agent sandboxes (default: ubuntu:24.04)
+  OMNI_WEB_PORT           Web console port (default: 8080; --port overrides)
   TELEGRAM_BOT_TOKEN      Telegram bot token from @BotFather
   TELEGRAM_ALLOWED_USERS  Comma-separated Telegram user ids allowed to chat (default: all)
   WHATSAPP_TOKEN          WhatsApp Cloud API access token
@@ -360,25 +396,30 @@ async function cmdChat(id: string): Promise<void> {
 async function cmdRun(id: string, task: string): Promise<void> {
   const home = omniHome();
   const config = new AgentRegistry(join(home, 'agents')).get(id);
-  const { gateway, memory } = buildGateway(home);
+  const recorder = new RunRecorder();
+  const { agent, memory } = await createAgentStack(home, config, {
+    approve: (req) => askApproval(`Allow tool "${req.tool}" with args ${JSON.stringify(req.args)}?`),
+    onEvent: (e) => {
+      recorder.record(e);
+      if (e.type === 'tool-call') console.log(`… calling ${e.call.name}`);
+      if (e.type === 'approval') console.log(`… ${e.call.name}: ${e.decision}`);
+    },
+    withSandbox: true,
+  });
+  const runId = randomUUID();
   try {
-    const agent = new Agent(config, {
-      provider: buildProvider(),
-      gateway,
-      policy: new PolicyEngine(config.policy),
-      approve: (req) => askApproval(`Allow tool "${req.tool}" with args ${JSON.stringify(req.args)}?`),
-      memory,
-      onEvent: (e) => {
-        if (e.type === 'tool-call') console.log(`… calling ${e.call.name}`);
-        if (e.type === 'approval') console.log(`… ${e.call.name}: ${e.decision}`);
-      },
-    });
     const result = await agent.run(task);
     console.log(result || '(no reply)');
   } catch (err) {
     console.error(`Error: ${friendlyError(err)}`);
     process.exit(1);
   } finally {
+    try {
+      const path = recorder.save(agentHomeDir(home, id), runId);
+      console.log(`Transcript saved: ${path}`);
+    } catch {
+      // Transcript persistence is best-effort.
+    }
     memory.close();
   }
 }
@@ -599,6 +640,105 @@ async function cmdWhatsapp(id: string, rest: string[]): Promise<void> {
   });
 }
 
+/**
+ * Learn a skill from the agent's most recent recorded run transcript.
+ * Exported (and tested): reads <agentDir>/runs, writes <agentDir>/skills.
+ */
+export function learnFromLatestRun(agentDir: string, skillName: string, description: string): Skill {
+  const latest = RunRecorder.latestFile(agentDir);
+  if (!latest) {
+    throw new Error('no recorded runs for this agent yet — run "omni run <id> ..." first');
+  }
+  const recorder = new RunRecorder();
+  for (const entry of RunRecorder.loadFile(latest)) recorder.record(entry.event);
+  const skill = learnSkillFromTranscript(skillName, description, recorder.toolCalls(), {
+    createdFrom: `run ${basename(latest, '.jsonl')}`,
+  });
+  new SkillManager(join(agentDir, 'skills')).save(skill);
+  return skill;
+}
+
+function cmdLearn(agentId: string, skillName: string | undefined, description: string | undefined): void {
+  if (!skillName || !description) {
+    console.error('usage: omni learn <agent-id> <skill-name> "<description>"');
+    process.exit(1);
+  }
+  const home = omniHome();
+  getAgentConfig(home, agentId); // throws if the agent does not exist
+  const dir = agentHomeDir(home, agentId);
+  try {
+    const skill = learnFromLatestRun(dir, skillName, description);
+    console.log(
+      `Learned skill "${skill.name}" v${skill.version}: ${skill.steps.length} step(s), ` +
+        `tools: ${skill.requiredTools.join(', ') || 'none'}`,
+    );
+    console.log(`Saved: ${join(dir, 'skills', skill.name, 'SKILL.md')}`);
+  } catch (err) {
+    console.error(`Error: ${errText(err)}`);
+    process.exit(1);
+  }
+}
+
+async function cmdWeb(portOpt: number | undefined): Promise<void> {
+  const home = omniHome();
+  const registry = new AgentRegistry(join(home, 'agents'));
+  const envPort = Number(process.env['OMNI_WEB_PORT'] ?? '');
+  const port = portOpt ?? (Number.isInteger(envPort) && envPort > 0 ? envPort : 8080);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    console.error('web port must be an integer 1-65535');
+    process.exit(1);
+  }
+  const memory = new SqliteMemoryStore(join(home, 'memory.db'));
+  const server = createWebServer({
+    registry,
+    agentHome: (id) => agentHomeDir(home, id),
+    makeAgent: (config, hooks) => {
+      const gateway = new ToolGateway();
+      registerStandardTools(gateway, memory);
+      registerHandoffTool(gateway, {
+        registry,
+        makeDeps: (target) => {
+          const subGateway = new ToolGateway();
+          registerStandardTools(subGateway, memory);
+          return {
+            provider: buildProvider(),
+            gateway: subGateway,
+            policy: new PolicyEngine(target.policy),
+            approve: hooks.approve,
+            memory,
+            onEvent: hooks.onEvent,
+          };
+        },
+      });
+      const effective = withSkillPrompt(config, agentHomeDir(home, config.id));
+      return new Agent(effective, {
+        provider: buildProvider(),
+        gateway,
+        policy: new PolicyEngine(config.policy),
+        approve: hooks.approve,
+        memory,
+        onEvent: hooks.onEvent,
+      });
+    },
+    host: '127.0.0.1',
+    port,
+  });
+  const actualPort = await server.start();
+  console.log(`Omni web console: http://127.0.0.1:${actualPort}`);
+  console.log('Local-only, no auth: do not expose this port to the public internet.');
+  const shutdown = (): void => {
+    void server.stop().finally(() => {
+      memory.close();
+      process.exit(0);
+    });
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+  await new Promise<never>(() => {
+    // run until a signal arrives
+  });
+}
+
 async function cmdSandboxExec(agentId: string, command: string): Promise<void> {
   const runtime = new DockerRuntime();
   try {
@@ -645,6 +785,25 @@ export async function main(argv: string[]): Promise<void> {
       }
       await cmdRun(rest[0], rest.slice(1).join(' '));
       break;
+    case 'learn': {
+      if (!rest[0]) {
+        console.error('usage: omni learn <agent-id> <skill-name> "<description>"');
+        process.exit(1);
+      }
+      cmdLearn(rest[0], rest[1], rest.slice(2).join(' ') || undefined);
+      break;
+    }
+    case 'web': {
+      let port: number | undefined;
+      try {
+        port = parsePort(rest);
+      } catch (err) {
+        console.error(`Error: ${errText(err)}`);
+        process.exit(1);
+      }
+      await cmdWeb(port);
+      break;
+    }
     case 'plugin':
       if (rest[0] === 'validate') cmdPluginValidate(rest[1]);
       else {

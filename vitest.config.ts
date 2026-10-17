@@ -4,6 +4,7 @@ import path from 'node:path';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
 const src = (pkg: string) => path.join(root, 'packages', pkg, 'src', 'index.ts');
+const appSrc = (app: string) => path.join(root, 'apps', app, 'src', 'index.ts');
 
 export default defineConfig({
   resolve: {
@@ -16,6 +17,8 @@ export default defineConfig({
       '@omni/channels-telegram': src('channels-telegram'),
       '@omni/channels-whatsapp': src('channels-whatsapp'),
       '@omni/scheduler': src('scheduler'),
+      '@omni/skills': src('skills'),
+      '@omni/web': appSrc('web'),
     },
   },
   test: {
