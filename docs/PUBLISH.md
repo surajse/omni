@@ -1,62 +1,47 @@
-# Publishing `omni-agents` to npm
+# Publishing to npm
 
-The CLI is publish-ready as **`omni-agents`** (verified free on the npm
-registry 2026-10-17 via `npm view omni-agents` → 404). The package is
-**not published yet** — publishing needs the maintainer's `npm login`.
+## Status (verified 2026-10-17)
+
+- **`omni-agents`** — name is FREE (`npm view omni-agents` → 404)
+- **`@omni/*` scope** — FREE (`npm view @omni/kernel` → 404)
+- All 20 publishable packages at **1.4.0** (`packages/*` × 18 + `apps/web` + `apps/cli`); repo root is `private: true` so it is skipped
+- `dist/` is built (`node scripts/verify.mjs` green); every package has `files` configured
 
 ## What's already in place
 
-`apps/cli/package.json` carries everything npm needs:
+- `apps/cli/package.json`: `name: omni-agents`, `bin: { omni: dist/src/index.js }` (shebang in source), `files: ["dist"]`, `publishConfig: { access: public }`, `engines: { node: ">=22" }`, repository/homepage/keywords
+- `pnpm publish` automatically rewrites `workspace:*` dependencies to the real version (1.4.0), so no manual version juggling is needed
 
-- `name: omni-agents`, `version: 1.0.0`, `license: MIT`
-- `bin: { omni: dist/src/index.js }` (shebang present in source)
-- `files: ["dist"]`, `repository`, `homepage`, `keywords`
-- `publishConfig: { access: public }`
-- `engines: { node: ">=22" }`
-
-## The one wrinkle: workspace dependencies
-
-`omni-agents` depends on `@omni/*` workspace packages (`workspace:*`).
-`pnpm publish` rewrites `workspace:*` to the real version (`1.0.0`), but npm
-cannot resolve `@omni/*` unless those packages are published too. So the
-publish order matters.
-
-## Exact publish steps (maintainer)
+## Exact steps (maintainer — step 0 is interactive and needs you)
 
 ```sh
-# 0. One-time: log in (interactive — needs the maintainer)
+# 0. One-time login (interactive — only you can do this)
 npm login
 
-# 1. Check the @omni scope situation. If the scope is taken, either claim it
-#    or publish the packages unscoped and update the CLI's dependencies.
-npm view @omni/kernel  # 404 = free
+# 1. Re-verify the names are still free (cheap — do it right before publishing)
+npm view omni-agents version   # expect 404
+npm view @omni/kernel version  # expect 404
 
-# 2. Publish the library packages first (dependency order), from the repo root:
-for p in plugin-spec channels kernel memory sandbox scheduler skills \
-         channels-telegram channels-whatsapp web registry importers teams; do
-  (cd packages/$p && pnpm publish --access public --no-git-checks)
-done
-# (adjust the loop if some packages live under apps/)
-
-# 3. Sanity-check what would ship for the CLI (no upload):
+# 2. Sanity-check what the CLI tarball would contain (no upload)
 (cd apps/cli && pnpm pack --dry-run)
 
-# 4. Publish the CLI:
-(cd apps/cli && pnpm publish --access public --no-git-checks)
+# 3. Publish everything in dependency order (root is private → skipped automatically)
+pnpm -r publish --access public --no-git-checks
+# → 18 × packages/* + apps/web + apps/cli = 20 packages, topological order,
+#   each workspace:* dep rewritten to 1.4.0
 
-# 5. Verify:
-npm view omni-agents version   # → 1.0.0
-npx --yes omni-agents --help   # bin wiring works from a clean install
+# 4. Verify from a clean state
+npm view omni-agents version       # → 1.4.0
+npx --yes omni-agents@1.4.0 --help # bin wiring works from a clean install
 ```
 
 ## After publishing
 
-- Tag the release: `git tag v1.0.0 && git push origin v1.0.0`
-- Attach `install.sh` + the changelog to a GitHub Release
-- Update `docs/INSTALL.md` method 3 (`npm install -g omni-agents`)
+- Tag the release: `git tag v1.4.0 && git push origin v1.4.0`
+- Create a GitHub Release for the tag; attach `install.sh` and the CHANGELOG notes
+- Update `docs/INSTALL.md` method 3 to `npm install -g omni-agents`
 
-## If `omni-agents` gets taken before we publish
+## If a name gets taken before we publish
 
-Next candidates, in order (all unchecked — verify with `npm view <name>`):
-`omni-agent`, `omniagent`, `open-omni`. The bin name (`omni`) is unaffected
-by the package name.
+Next candidates, in order (verify each with `npm view <name>` → expect 404):
+`omni-agent`, `omniagent`, `open-omni`. The bin name (`omni`) is unaffected by the package name.
